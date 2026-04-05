@@ -150,6 +150,25 @@ def test_operation_telemetry_summary_omits_zero_valued_fields():
     }
 
 
+def test_operation_telemetry_summary_includes_search_stage_durations():
+    from openviking.telemetry.operation import OperationTelemetry
+
+    telemetry = OperationTelemetry(operation="search.search", enabled=True)
+    telemetry.set("search.vlm.duration_ms", 12.4)
+    telemetry.set("search.embedding.duration_ms", 3.1)
+    telemetry.set("search.vector_db.duration_ms", 18.9)
+    telemetry.set("search.rerank.duration_ms", 5.6)
+
+    summary = telemetry.finish().summary
+
+    assert summary["search"] == {
+        "vlm": {"duration_ms": 12.4},
+        "embedding": {"duration_ms": 3.1},
+        "vector_db": {"duration_ms": 18.9},
+        "rerank": {"duration_ms": 5.6},
+    }
+
+
 @pytest.mark.asyncio
 async def test_run_with_telemetry_returns_usage_and_payload():
     from openviking.telemetry.execution import run_with_telemetry
@@ -203,7 +222,10 @@ def test_attach_telemetry_payload_adds_telemetry_to_dict_result():
 
     result = attach_telemetry_payload(
         {"root_uri": "viking://resources/demo"},
-        {"id": "tm_123", "summary": {"operation": "resources.add_resource"}},
+        {
+            "id": "1234567890abcdef1234567890abcdef",
+            "summary": {"operation": "resources.add_resource"},
+        },
     )
 
     assert result["telemetry"]["summary"]["operation"] == "resources.add_resource"
@@ -216,7 +238,7 @@ def test_attach_telemetry_payload_does_not_mutate_object_result():
 
     attached = attach_telemetry_payload(
         result,
-        {"id": "tm_123", "summary": {"operation": "search.find"}},
+        {"id": "1234567890abcdef1234567890abcdef", "summary": {"operation": "search.find"}},
     )
 
     assert attached is result
@@ -229,7 +251,10 @@ def test_find_result_ignores_usage_and_telemetry_payload_fields():
             "memories": [],
             "resources": [],
             "skills": [],
-            "telemetry": {"id": "tm_123", "summary": {"operation": "search.find"}},
+            "telemetry": {
+                "id": "1234567890abcdef1234567890abcdef",
+                "summary": {"operation": "search.find"},
+            },
         }
     )
 

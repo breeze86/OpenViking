@@ -129,7 +129,9 @@ class HierarchicalRetriever:
         query_vector = None
         sparse_query_vector = None
         if self.embedder:
-            result: EmbedResult = self.embedder.embed(query.query, is_query=True)
+            telemetry = get_current_telemetry()
+            with telemetry.measure("search.embedding"):
+                result: EmbedResult = self.embedder.embed(query.query, is_query=True)
             query_vector = result.dense_vector
             sparse_query_vector = result.sparse_vector
 
@@ -233,15 +235,16 @@ class HierarchicalRetriever:
         limit: int,
     ) -> List[Dict[str, Any]]:
         """Global vector search to locate initial directories."""
-        results = await vector_proxy.search_global_roots_in_tenant(
-            query_vector=query_vector,
-            sparse_query_vector=sparse_query_vector,
-            context_type=context_type,
-            target_directories=target_dirs,
-            extra_filter=scope_dsl,
-            limit=limit,
-        )
         telemetry = get_current_telemetry()
+        with telemetry.measure("search.vector_db"):
+            results = await vector_proxy.search_global_roots_in_tenant(
+                query_vector=query_vector,
+                sparse_query_vector=sparse_query_vector,
+                context_type=context_type,
+                target_directories=target_dirs,
+                extra_filter=scope_dsl,
+                limit=limit,
+            )
         telemetry.count("vector.searches", 1)
         telemetry.count("vector.scored", len(results))
         telemetry.count("vector.scanned", len(results))
@@ -258,7 +261,9 @@ class HierarchicalRetriever:
             return fallback_scores
 
         try:
-            scores = self._rerank_client.rerank_batch(query, documents)
+            telemetry = get_current_telemetry()
+            with telemetry.measure("search.rerank"):
+                scores = self._rerank_client.rerank_batch(query, documents)
         except Exception as e:
             logger.warning(
                 "[HierarchicalRetriever] Rerank failed, fallback to vector scores: %s", e
@@ -420,16 +425,17 @@ class HierarchicalRetriever:
 
             pre_filter_limit = max(limit * 2, 20)
 
-            results = await vector_proxy.search_children_in_tenant(
-                parent_uri=current_uri,
-                query_vector=query_vector,
-                sparse_query_vector=sparse_query_vector,  # Pass sparse vector
-                context_type=context_type,
-                target_directories=target_dirs,
-                extra_filter=scope_dsl,
-                limit=pre_filter_limit,
-            )
             telemetry = get_current_telemetry()
+            with telemetry.measure("search.vector_db"):
+                results = await vector_proxy.search_children_in_tenant(
+                    parent_uri=current_uri,
+                    query_vector=query_vector,
+                    sparse_query_vector=sparse_query_vector,  # Pass sparse vector
+                    context_type=context_type,
+                    target_directories=target_dirs,
+                    extra_filter=scope_dsl,
+                    limit=pre_filter_limit,
+                )
             telemetry.count("vector.searches", 1)
             telemetry.count("vector.scored", len(results))
             telemetry.count("vector.scanned", len(results))

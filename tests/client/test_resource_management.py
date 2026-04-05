@@ -73,7 +73,7 @@ class TestAddResource:
         assert result["root_uri"] == "viking://resources/demo"
         assert result["queue_status"] == queue_status
         assert seen["enabled"] is True
-        assert str(seen["telemetry_id"]).startswith("tm_")
+        assert len(str(seen["telemetry_id"])) == 32
         assert seen["kwargs"]["wait"] is True
 
     async def test_add_resource_without_wait(

@@ -6,7 +6,7 @@ from openviking.telemetry.request_wait_tracker import RequestWaitTracker
 
 def test_request_wait_tracker_cleanup_prevents_state_recreation():
     tracker = RequestWaitTracker()
-    telemetry_id = "tm_cleanup"
+    telemetry_id = "cleanup123"
 
     tracker.register_request(telemetry_id)
     tracker.register_semantic_root(telemetry_id, "semantic-1")
@@ -23,7 +23,7 @@ def test_request_wait_tracker_cleanup_prevents_state_recreation():
 
 def test_request_wait_tracker_cleanup_prevents_root_recreation():
     tracker = RequestWaitTracker()
-    telemetry_id = "tm_late_root"
+    telemetry_id = "late_root123"
 
     tracker.register_request(telemetry_id)
     tracker.cleanup(telemetry_id)

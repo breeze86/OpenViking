@@ -7,6 +7,8 @@ import httpx
 import pytest
 
 from openviking.models.embedder.base import EmbedResult
+from openviking.telemetry import get_current_telemetry
+from openviking_cli.retrieve.types import ContextType, FindResult, MatchedContext
 
 
 @pytest.fixture(autouse=True)
@@ -16,6 +18,33 @@ def fake_query_embedder(service):
             return EmbedResult(dense_vector=[0.1, 0.2, 0.3])
 
     service.viking_fs.query_embedder = FakeEmbedder()
+
+
+@pytest.fixture(autouse=True)
+def fake_search_backend(service, monkeypatch):
+    def _resource(uri: str) -> MatchedContext:
+        return MatchedContext(
+            uri=uri,
+            context_type=ContextType.RESOURCE,
+            score=0.91,
+            abstract="Sample document",
+        )
+
+    async def _fake_find(**kwargs):
+        query = kwargs.get("query", "")
+        if "nonexistent" in query:
+            return FindResult(memories=[], resources=[], skills=[])
+        return FindResult(
+            memories=[],
+            resources=[_resource(kwargs.get("target_uri") or "viking://resources/sample.md")],
+            skills=[],
+        )
+
+    async def _fake_search(**kwargs):
+        return await _fake_find(**kwargs)
+
+    monkeypatch.setattr(service.search, "find", _fake_find)
+    monkeypatch.setattr(service.search, "search", _fake_search)
 
 
 async def test_find_basic(client_with_resource):
@@ -95,8 +124,19 @@ async def test_search_with_session(client_with_resource):
     assert resp.json()["status"] == "ok"
 
 
-async def test_find_telemetry_metrics(client_with_resource):
+async def test_find_telemetry_metrics(client_with_resource, service, monkeypatch):
     client, _ = client_with_resource
+
+    async def _fake_find(**kwargs):
+        telemetry = get_current_telemetry()
+        telemetry.set("search.embedding.duration_ms", 3.1)
+        telemetry.set("search.vector_db.duration_ms", 18.9)
+        telemetry.count("vector.searches", 1)
+        telemetry.set("vector.returned", 0)
+        return FindResult(memories=[], resources=[], skills=[])
+
+    monkeypatch.setattr(service.search, "find", _fake_find)
+
     resp = await client.post(
         "/api/v1/search/find",
         json={"query": "sample document", "limit": 5, "telemetry": True},
@@ -106,19 +146,33 @@ async def test_find_telemetry_metrics(client_with_resource):
     summary = body["telemetry"]["summary"]
     assert summary["operation"] == "search.find"
     assert "duration_ms" in summary
-    assert {"total", "llm", "embedding"}.issubset(summary["tokens"].keys())
     assert "vector" in summary
     assert summary["vector"]["searches"] >= 0
     assert "queue" not in summary
     assert "semantic_nodes" not in summary
     assert "memory" not in summary
+    assert "search" in summary
+    assert summary["search"]["embedding"]["duration_ms"] >= 0
+    assert summary["search"]["vector_db"]["duration_ms"] >= 0
+    assert "vlm" not in summary["search"]
     assert "usage" not in body
     assert body["telemetry"]["id"]
-    assert body["telemetry"]["id"].startswith("tm_")
+    assert len(body["telemetry"]["id"]) == 32
 
 
-async def test_search_telemetry_metrics(client_with_resource):
+async def test_search_telemetry_metrics(client_with_resource, service, monkeypatch):
     client, _ = client_with_resource
+
+    async def _fake_search(**kwargs):
+        telemetry = get_current_telemetry()
+        telemetry.set("search.embedding.duration_ms", 3.1)
+        telemetry.set("search.vector_db.duration_ms", 18.9)
+        telemetry.count("vector.searches", 1)
+        telemetry.set("vector.returned", 1)
+        return FindResult(memories=[], resources=[], skills=[])
+
+    monkeypatch.setattr(service.search, "search", _fake_search)
+
     resp = await client.post(
         "/api/v1/search/search",
         json={"query": "sample document", "limit": 5, "telemetry": True},
@@ -127,10 +181,49 @@ async def test_search_telemetry_metrics(client_with_resource):
     body = resp.json()
     summary = body["telemetry"]["summary"]
     assert summary["operation"] == "search.search"
+    assert "duration_ms" in summary
     assert summary["vector"]["returned"] >= 0
+    assert "search" in summary
+    assert summary["search"]["embedding"]["duration_ms"] >= 0
+    assert summary["search"]["vector_db"]["duration_ms"] >= 0
     assert "queue" not in summary
     assert "semantic_nodes" not in summary
     assert "memory" not in summary
+    assert "vlm" not in summary["search"]
+
+
+async def test_search_telemetry_includes_vlm_and_rerank_when_used(
+    client_with_resource, service, monkeypatch
+):
+    client, _ = client_with_resource
+
+    sess_resp = await client.post("/api/v1/sessions", json={})
+    session_id = sess_resp.json()["result"]["session_id"]
+    await client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"role": "user", "content": "find the sample resource"},
+    )
+
+    async def _fake_search(**kwargs):
+        telemetry = get_current_telemetry()
+        telemetry.set("search.vlm.duration_ms", 12.4)
+        telemetry.set("search.embedding.duration_ms", 3.1)
+        telemetry.set("search.vector_db.duration_ms", 18.9)
+        telemetry.set("search.rerank.duration_ms", 5.6)
+        telemetry.count("vector.searches", 1)
+        telemetry.set("vector.returned", 0)
+        return FindResult(memories=[], resources=[], skills=[])
+
+    monkeypatch.setattr(service.search, "search", _fake_search)
+
+    resp = await client.post(
+        "/api/v1/search/search",
+        json={"query": "sample document", "session_id": session_id, "limit": 5, "telemetry": True},
+    )
+    assert resp.status_code == 200
+    summary = resp.json()["telemetry"]["summary"]
+    assert summary["search"]["vlm"]["duration_ms"] >= 0
+    assert summary["search"]["rerank"]["duration_ms"] >= 0
 
 
 async def test_find_summary_only_telemetry(client_with_resource):
@@ -195,8 +288,6 @@ async def test_grep_case_insensitive(client_with_resource):
     assert resp.json()["status"] == "ok"
 
 
-
-
 async def test_grep_exclude_uri_excludes_specific_uri_range(
     client: httpx.AsyncClient,
     upload_temp_dir,
@@ -231,7 +322,7 @@ async def test_grep_exclude_uri_excludes_specific_uri_range(
     assert body["status"] == "ok"
     matches = body["result"]["matches"]
     assert matches
-    assert all(not m["uri"].startswith(exclude_uri.rstrip('/')) for m in matches)
+    assert all(not m["uri"].startswith(exclude_uri.rstrip("/")) for m in matches)
 
 
 async def test_grep_exclude_uri_does_not_exclude_same_named_sibling_dirs(
@@ -274,6 +365,7 @@ async def test_grep_exclude_uri_does_not_exclude_same_named_sibling_dirs(
     uris = {m["uri"] for m in matches}
     assert any(uri.startswith("viking://resources/group_b/cache/") for uri in uris)
     assert all(not uri.startswith("viking://resources/group_a/cache/") for uri in uris)
+
 
 async def test_glob(client_with_resource):
     client, _ = client_with_resource

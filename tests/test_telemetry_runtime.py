@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -27,9 +28,13 @@ from openviking.telemetry.snapshot import TelemetrySnapshot
 from openviking_cli.session.user_id import UserIdentifier
 
 
+def _is_uuid_hex(value: str) -> bool:
+    return bool(re.fullmatch(r"[0-9a-f]{32}", value))
+
+
 def test_telemetry_module_exports_snapshot_and_runtime():
     snapshot = TelemetrySnapshot(
-        telemetry_id="tm_demo",
+        telemetry_id="demo123",
         summary={"duration_ms": 1.2},
     )
     usage = snapshot.to_usage_dict()
@@ -40,14 +45,14 @@ def test_telemetry_module_exports_snapshot_and_runtime():
 
 def test_telemetry_snapshot_to_dict_supports_summary_only():
     snapshot = TelemetrySnapshot(
-        telemetry_id="tm_demo",
+        telemetry_id="demo123",
         summary={"duration_ms": 1.2, "tokens": {"total": 3}},
     )
 
     payload = snapshot.to_dict(include_summary=True)
 
     assert payload == {
-        "id": "tm_demo",
+        "id": "demo123",
         "summary": {"duration_ms": 1.2, "tokens": {"total": 3}},
     }
 
@@ -59,7 +64,7 @@ def test_telemetry_summary_breaks_down_llm_and_embedding_token_usage():
 
     summary = telemetry.finish().summary
     assert telemetry.telemetry_id
-    assert telemetry.telemetry_id.startswith("tm_")
+    assert _is_uuid_hex(telemetry.telemetry_id)
     assert summary["tokens"]["total"] == 31
     assert summary["duration_ms"] >= 0
     assert summary["tokens"]["llm"] == {
@@ -79,7 +84,7 @@ def test_disabled_telemetry_still_has_request_id():
     telemetry = MemoryOperationTelemetry(operation="resources.add_resource", enabled=False)
 
     assert telemetry.telemetry_id
-    assert telemetry.telemetry_id.startswith("tm_")
+    assert _is_uuid_hex(telemetry.telemetry_id)
 
 
 def test_telemetry_summary_uses_simplified_internal_metric_keys():
@@ -258,6 +263,10 @@ async def test_resource_service_add_resource_reports_queue_summary(monkeypatch):
     monkeypatch.setattr(
         "openviking.service.resource_service.get_queue_manager",
         lambda: _DummyQueueManager(),
+    )
+    monkeypatch.setattr(
+        "openviking.service.resource_service.register_wait_telemetry",
+        lambda wait: "",
     )
 
     class _DagStats:

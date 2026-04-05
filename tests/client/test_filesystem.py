@@ -105,7 +105,7 @@ class TestRead:
         assert result["uri"] == "viking://resources/demo.md"
         assert result["queue_status"] == queue_status
         assert seen["enabled"] is True
-        assert str(seen["telemetry_id"]).startswith("tm_")
+        assert len(str(seen["telemetry_id"])) == 32
         assert seen["kwargs"]["wait"] is True
 
 

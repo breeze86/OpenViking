@@ -3,10 +3,14 @@
 
 """Hierarchical retriever rerank behavior tests."""
 
+from itertools import count
+
 import pytest
 
 from openviking.retrieve.hierarchical_retriever import HierarchicalRetriever, RetrieverMode
 from openviking.server.identity import RequestContext, Role
+from openviking.telemetry.backends.memory import MemoryOperationTelemetry
+from openviking.telemetry.context import bind_telemetry
 from openviking_cli.retrieve.types import ContextType, TypedQuery
 from openviking_cli.session.user_id import UserIdentifier
 from openviking_cli.utils.config import RerankConfig
@@ -366,3 +370,34 @@ async def test_quick_mode_skips_rerank(monkeypatch):
         "viking://resources/file-a",
     ]
     assert fake_client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_retrieve_records_embedding_vector_db_and_rerank_durations(monkeypatch):
+    fake_client = FakeRerankClient([0.95, 0.05, 0.11, 0.95])
+    monkeypatch.setattr(
+        "openviking.retrieve.hierarchical_retriever.RerankClient.from_config",
+        lambda config: fake_client,
+    )
+    perf_values = (step / 1000 for step in count())
+    monkeypatch.setattr(
+        "openviking.telemetry.operation.time.perf_counter",
+        lambda: next(perf_values),
+    )
+
+    telemetry = MemoryOperationTelemetry(operation="search.find", enabled=True)
+    retriever = HierarchicalRetriever(
+        storage=DummyStorage(),
+        embedder=DummyEmbedder(),
+        rerank_config=_config(),
+    )
+
+    with bind_telemetry(telemetry):
+        await retriever.retrieve(_query(), ctx=_ctx(), limit=2, mode=RetrieverMode.THINKING)
+
+    summary = telemetry.finish().summary
+    assert summary["search"] == {
+        "embedding": {"duration_ms": 1.0},
+        "vector_db": {"duration_ms": 4.0},
+        "rerank": {"duration_ms": 2.0},
+    }

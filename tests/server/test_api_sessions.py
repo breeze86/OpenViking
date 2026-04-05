@@ -264,6 +264,27 @@ async def test_compress_session(client: httpx.AsyncClient):
     assert "telemetry" not in body
 
 
+async def test_compress_session_with_telemetry(client: httpx.AsyncClient):
+    create_resp = await client.post("/api/v1/sessions", json={})
+    session_id = create_resp.json()["result"]["session_id"]
+
+    await client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"role": "user", "content": "Hello"},
+    )
+
+    resp = await client.post(
+        f"/api/v1/sessions/{session_id}/commit",
+        json={"telemetry": True},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["result"]["status"] == "accepted"
+    assert body["telemetry"]["summary"]["operation"] == "session.commit"
+    assert len(body["telemetry"]["id"]) == 32
+
+
 async def test_extract_session_jsonable_regression(client: httpx.AsyncClient, service, monkeypatch):
     """Regression: extract endpoint should serialize internal objects."""
 
@@ -289,6 +310,43 @@ async def test_extract_session_jsonable_regression(client: httpx.AsyncClient, se
     body = resp.json()
     assert body["status"] == "ok"
     assert body["result"] == [{"uri": "viking://user/memories/mock.md"}]
+
+
+async def test_extract_session_with_telemetry(client: httpx.AsyncClient, service, monkeypatch):
+    """Extract endpoint should return telemetry when requested."""
+
+    class FakeMemory:
+        __slots__ = ("uri",)
+
+        def __init__(self, uri: str):
+            self.uri = uri
+
+        def to_dict(self):
+            return {"uri": self.uri}
+
+    async def fake_extract(_session_id: str, _ctx):
+        from openviking.telemetry import get_current_telemetry
+
+        telemetry = get_current_telemetry()
+        telemetry.set("memory.extracted", 1)
+        telemetry.set("memory.extract.created", 1)
+        return [FakeMemory("viking://user/memories/mock.md")]
+
+    monkeypatch.setattr(service.sessions, "extract", fake_extract)
+
+    create_resp = await client.post("/api/v1/sessions", json={"user": "test"})
+    session_id = create_resp.json()["result"]["session_id"]
+
+    resp = await client.post(
+        f"/api/v1/sessions/{session_id}/extract",
+        json={"telemetry": True},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["result"] == [{"uri": "viking://user/memories/mock.md"}]
+    assert body["telemetry"]["summary"]["operation"] == "session.extract"
+    assert body["telemetry"]["summary"]["memory"]["extracted"] == 1
 
 
 async def test_get_session_context_endpoint_returns_trimmed_latest_archive_and_messages(

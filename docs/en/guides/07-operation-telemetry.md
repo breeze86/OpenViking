@@ -21,7 +21,7 @@ Typical response shape:
   "status": "ok",
   "result": {"...": "..."},
   "telemetry": {
-    "id": "tm_xxx",
+    "id": "7b6f8c5d3e0a4f8da2f1f4cb6c9d12ab",
     "summary": {
       "operation": "search.find",
       "status": "ok",
@@ -128,6 +128,7 @@ The top-level summary always includes:
 Depending on the operation, you may also see these groups:
 
 - `tokens`: LLM and embedding token totals
+- `search`: internal search-pipeline stage durations
 - `vector`: vector search and filtering counts
 - `resource`: resource ingestion and processing stages
 - `queue`: queue processing counts for wait-mode imports
@@ -170,6 +171,23 @@ Only fields that are actually produced by an operation are returned. Missing gro
 | `summary.vector.returned` | Number of results returned to upper-layer logic |
 | `summary.vector.scanned` | Number of vectors scanned by the backend |
 | `summary.vector.scan_reason` | Text description of the scan strategy or reason |
+
+### `summary.search`
+
+This group commonly appears on `search.find` and `search.search`.
+
+| Field | Meaning |
+| --- | --- |
+| `summary.search.vlm.duration_ms` | Time spent in query understanding or intent analysis |
+| `summary.search.embedding.duration_ms` | Time spent generating the query embedding |
+| `summary.search.vector_db.duration_ms` | Cumulative time spent querying the vector database |
+| `summary.search.rerank.duration_ms` | Cumulative time spent reranking candidates |
+
+Notes:
+
+- `search.find` typically does not emit `summary.search.vlm.duration_ms`
+- `summary.search.rerank.duration_ms` is omitted when rerank is not used
+- Fields that were not executed, or that end up as `0`, are omitted
 
 ### `summary.resource`
 

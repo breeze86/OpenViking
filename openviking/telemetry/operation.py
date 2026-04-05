@@ -252,6 +252,22 @@ class TelemetrySummaryBuilder:
                 },
             }
 
+        if cls._has_metric_prefix("search", counters, gauges):
+            summary["search"] = {
+                "vlm": {
+                    "duration_ms": cls._f(gauges.get("search.vlm.duration_ms"), 0.0),
+                },
+                "embedding": {
+                    "duration_ms": cls._f(gauges.get("search.embedding.duration_ms"), 0.0),
+                },
+                "vector_db": {
+                    "duration_ms": cls._f(gauges.get("search.vector_db.duration_ms"), 0.0),
+                },
+                "rerank": {
+                    "duration_ms": cls._f(gauges.get("search.rerank.duration_ms"), 0.0),
+                },
+            }
+
         if error_stage or error_code or error_message:
             summary["errors"] = {
                 "stage": error_stage,
@@ -259,7 +275,16 @@ class TelemetrySummaryBuilder:
                 "message": error_message,
             }
 
-        for key in ("tokens", "queue", "vector", "semantic_nodes", "memory", "resource", "errors"):
+        for key in (
+            "tokens",
+            "queue",
+            "vector",
+            "semantic_nodes",
+            "memory",
+            "resource",
+            "search",
+            "errors",
+        ):
             if key not in summary:
                 continue
             pruned_value = cls._prune_zero_metrics(summary[key])
@@ -281,7 +306,7 @@ class OperationTelemetry:
     ):
         self.operation = operation
         self.enabled = enabled
-        self.telemetry_id = f"tm_{uuid4().hex}"
+        self.telemetry_id = uuid4().hex
         self._start_time = time.perf_counter()
         self._counters: Dict[str, float] = defaultdict(float)
         self._gauges: Dict[str, Any] = {}

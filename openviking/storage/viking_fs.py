@@ -1039,13 +1039,14 @@ class VikingFS:
         # With session context: intent analysis
         if session_summary or current_messages:
             analyzer = IntentAnalyzer(max_recent_messages=5)
-            query_plan = await analyzer.analyze(
-                compression_summary=session_summary or "",
-                messages=current_messages or [],
-                current_message=query,
-                context_type=target_context_type,
-                target_abstract=target_abstract,
-            )
+            with telemetry.measure("search.vlm"):
+                query_plan = await analyzer.analyze(
+                    compression_summary=session_summary or "",
+                    messages=current_messages or [],
+                    current_message=query,
+                    context_type=target_context_type,
+                    target_abstract=target_abstract,
+                )
             typed_queries = query_plan.queries
             # Set target_directories
             if target_uri_list:

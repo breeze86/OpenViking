@@ -106,7 +106,7 @@ This skill was created from a string.
         assert result["uri"] == "viking://agent/skills/waited-skill"
         assert result["queue_status"] == queue_status
         assert seen["enabled"] is True
-        assert str(seen["telemetry_id"]).startswith("tm_")
+        assert len(str(seen["telemetry_id"])) == 32
         assert seen["kwargs"]["wait"] is True
 
     async def test_add_skill_from_mcp_tool(self, client: AsyncOpenViking):

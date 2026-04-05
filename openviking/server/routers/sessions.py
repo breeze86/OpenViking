@@ -6,7 +6,7 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
-from fastapi import APIRouter, Depends, Path, Query
+from fastapi import APIRouter, Body, Depends, Path, Query
 from pydantic import BaseModel, model_validator
 
 from openviking.message.part import TextPart, part_from_dict
@@ -14,6 +14,8 @@ from openviking.server.auth import get_request_context
 from openviking.server.dependencies import get_service
 from openviking.server.identity import RequestContext
 from openviking.server.models import ErrorInfo, Response
+from openviking.server.telemetry import run_operation
+from openviking.telemetry import TelemetryRequest
 
 router = APIRouter(prefix="/api/v1/sessions", tags=["sessions"])
 logger = logging.getLogger(__name__)
@@ -65,6 +67,7 @@ class AddMessageRequest(BaseModel):
     content: Optional[str] = None
     parts: Optional[List[Dict[str, Any]]] = None
     created_at: Optional[str] = None
+    telemetry: TelemetryRequest = False
 
     @model_validator(mode="after")
     def validate_content_or_parts(self) -> "AddMessageRequest":
@@ -78,12 +81,26 @@ class UsedRequest(BaseModel):
 
     contexts: Optional[List[str]] = None
     skill: Optional[Dict[str, Any]] = None
+    telemetry: TelemetryRequest = False
 
 
 class CreateSessionRequest(BaseModel):
     """Request model for creating a session."""
 
     session_id: Optional[str] = None
+    telemetry: TelemetryRequest = False
+
+
+class CommitSessionRequest(BaseModel):
+    """Request model for committing a session."""
+
+    telemetry: TelemetryRequest = False
+
+
+class ExtractSessionRequest(BaseModel):
+    """Request model for extracting session memories."""
+
+    telemetry: TelemetryRequest = False
 
 
 def _to_jsonable(value: Any) -> Any:
@@ -100,7 +117,7 @@ def _to_jsonable(value: Any) -> Any:
 
 @router.post("")
 async def create_session(
-    request: Optional[CreateSessionRequest] = None,
+    request: Optional[CreateSessionRequest] = Body(None),
     _ctx: RequestContext = Depends(get_request_context),
 ):
     """Create a new session.
@@ -109,17 +126,27 @@ async def create_session(
     If session_id is None, creates a new session with auto-generated ID.
     """
     service = get_service()
-    await service.initialize_user_directories(_ctx)
-    await service.initialize_agent_directories(_ctx)
-    session_id = request.session_id if request else None
-    session = await service.sessions.create(_ctx, session_id)
-    return Response(
-        status="ok",
-        result={
+
+    async def _create() -> Dict[str, Any]:
+        await service.initialize_user_directories(_ctx)
+        await service.initialize_agent_directories(_ctx)
+        session_id = request.session_id if request else None
+        session = await service.sessions.create(_ctx, session_id)
+        return {
             "session_id": session.session_id,
             "user": session.user.to_dict(),
-        },
+        }
+
+    execution = await run_operation(
+        operation="session.create",
+        telemetry=request.telemetry if request else False,
+        fn=_create,
     )
+    return Response(
+        status="ok",
+        result=execution.result,
+        telemetry=execution.telemetry,
+    ).model_dump(exclude_none=True)
 
 
 @router.get("")
@@ -206,6 +233,7 @@ async def delete_session(
 @router.post("/{session_id}/commit")
 async def commit_session(
     session_id: str = Path(..., description="Session ID"),
+    request: Optional[CommitSessionRequest] = Body(None),
     _ctx: RequestContext = Depends(get_request_context),
 ):
     """Commit a session (archive and extract memories).
@@ -215,19 +243,36 @@ async def commit_session(
     polling progress via ``GET /tasks/{task_id}``.
     """
     service = get_service()
-    result = await service.sessions.commit_async(session_id, _ctx)
-    return Response(status="ok", result=result).model_dump(exclude_none=True)
+    execution = await run_operation(
+        operation="session.commit",
+        telemetry=request.telemetry if request else False,
+        fn=lambda: service.sessions.commit_async(session_id, _ctx),
+    )
+    return Response(
+        status="ok",
+        result=execution.result,
+        telemetry=execution.telemetry,
+    ).model_dump(exclude_none=True)
 
 
 @router.post("/{session_id}/extract")
 async def extract_session(
     session_id: str = Path(..., description="Session ID"),
+    request: Optional[ExtractSessionRequest] = Body(None),
     _ctx: RequestContext = Depends(get_request_context),
 ):
     """Extract memories from a session."""
     service = get_service()
-    result = await service.sessions.extract(session_id, _ctx)
-    return Response(status="ok", result=_to_jsonable(result))
+    execution = await run_operation(
+        operation="session.extract",
+        telemetry=request.telemetry if request else False,
+        fn=lambda: service.sessions.extract(session_id, _ctx),
+    )
+    return Response(
+        status="ok",
+        result=_to_jsonable(execution.result),
+        telemetry=execution.telemetry,
+    ).model_dump(exclude_none=True)
 
 
 @router.post("/{session_id}/messages")
@@ -251,30 +296,39 @@ async def add_message(
     If both `content` and `parts` are provided, `parts` takes precedence.
     """
     service = get_service()
-    session = service.sessions.session(_ctx, session_id)
-    await session.load()
 
-    if request.parts is not None:
-        parts = [part_from_dict(p) for p in request.parts]
-    else:
-        parts = [TextPart(text=request.content or "")]
+    async def _add_message() -> Dict[str, Any]:
+        session = service.sessions.session(_ctx, session_id)
+        await session.load()
 
-    # 解析 created_at
-    created_at = None
-    if request.created_at:
-        try:
-            created_at = datetime.fromisoformat(request.created_at)
-        except ValueError:
-            logger.warning(f"Invalid created_at format: {request.created_at}")
+        if request.parts is not None:
+            parts = [part_from_dict(p) for p in request.parts]
+        else:
+            parts = [TextPart(text=request.content or "")]
 
-    session.add_message(request.role, parts, created_at=created_at)
-    return Response(
-        status="ok",
-        result={
+        created_at = None
+        if request.created_at:
+            try:
+                created_at = datetime.fromisoformat(request.created_at)
+            except ValueError:
+                logger.warning(f"Invalid created_at format: {request.created_at}")
+
+        session.add_message(request.role, parts, created_at=created_at)
+        return {
             "session_id": session_id,
             "message_count": len(session.messages),
-        },
+        }
+
+    execution = await run_operation(
+        operation="session.add_message",
+        telemetry=request.telemetry,
+        fn=_add_message,
     )
+    return Response(
+        status="ok",
+        result=execution.result,
+        telemetry=execution.telemetry,
+    ).model_dump(exclude_none=True)
 
 
 @router.post("/{session_id}/used")
@@ -285,14 +339,24 @@ async def record_used(
 ):
     """Record actually used contexts and skills in a session."""
     service = get_service()
-    session = service.sessions.session(_ctx, session_id)
-    await session.load()
-    session.used(contexts=request.contexts, skill=request.skill)
-    return Response(
-        status="ok",
-        result={
+
+    async def _record_used() -> Dict[str, Any]:
+        session = service.sessions.session(_ctx, session_id)
+        await session.load()
+        session.used(contexts=request.contexts, skill=request.skill)
+        return {
             "session_id": session_id,
             "contexts_used": session.stats.contexts_used,
             "skills_used": session.stats.skills_used,
-        },
+        }
+
+    execution = await run_operation(
+        operation="session.used",
+        telemetry=request.telemetry,
+        fn=_record_used,
     )
+    return Response(
+        status="ok",
+        result=execution.result,
+        telemetry=execution.telemetry,
+    ).model_dump(exclude_none=True)
