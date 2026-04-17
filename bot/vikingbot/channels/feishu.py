@@ -960,6 +960,8 @@ class FeishuChannel(BaseChannel):
                     content = content.replace(placeholder, f"@{user_id}")
                     if not is_self_bot and mention_name:
                         mention_name_map[user_id] = mention_name
+                    if is_self_bot:
+                        content = content.replace(f"@{user_id}", "")
             # 兜底：如果还有没替换的占位符，用 sender_id 替换
             if "@_user_" in content:
                 content = MENTION_PATTERN.sub(f"@{sender_id}", content)
