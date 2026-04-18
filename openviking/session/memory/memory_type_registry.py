@@ -18,6 +18,60 @@ from openviking_cli.utils import get_logger
 logger = get_logger(__name__)
 
 
+def infer_ownership_fields(schema: "MemoryTypeSchema") -> "MemoryTypeSchema":
+    """
+    根据 schema 的 directory 配置自动推断并注入归属字段。
+
+    规则：
+    - directory 包含 {{ user_space }} 且没有 ranges 字段 → 注入 user_id 字段
+    - agent_id 自动从对话获取，不需要注入
+
+    Args:
+        schema: 原始的 memory schema
+
+    Returns:
+        注入了归属字段的 schema
+    """
+    from openviking.session.memory.dataclass import MemoryField
+    from openviking.session.memory.merge_op.base import FieldType
+    from openviking.session.memory.merge_op import MergeOp
+
+    # 检查是否需要 user_id
+    needs_user_id = False
+    has_ranges = False
+    has_user_id = False
+
+    directory = schema.directory or ""
+
+    # 检查 directory 是否包含 user_space
+    if "{{ user_space }}" in directory:
+        needs_user_id = True
+
+    # 检查 fields
+    field_names = {field.name for field in schema.fields}
+    has_user_id = "user_id" in field_names
+    has_ranges = "ranges" in field_names
+
+    # 如果有 ranges 字段，不需要 user_id（从 range 获取）
+    if has_ranges:
+        needs_user_id = False
+
+    # 如果需要 user_id 但字段不存在，自动注入
+    if needs_user_id and not has_user_id:
+        user_id_field = MemoryField(
+            name="user_id",
+            field_type=FieldType.STRING,
+            description="User ID for the memory owner. Must be one of the user participants in the session conversation.",
+            merge_op=MergeOp.IMMUTABLE,
+        )
+        # 将 user_id 插入到 fields 开头
+        new_fields = [user_id_field] + list(schema.fields)
+        schema.fields = new_fields
+        logger.debug(f"Auto-injected user_id field to {schema.memory_type} schema")
+
+    return schema
+
+
 class MemoryTypeRegistry:
     """
     Registry for memory types.
@@ -128,6 +182,8 @@ class MemoryTypeRegistry:
             data = yaml.safe_load(f)
 
         memory_type = self._parse_memory_type(data)
+        # 自动注入归属字段
+        memory_type = infer_ownership_fields(memory_type)
         self.register(memory_type)
 
     def load_from_directory(self, dir_path: str) -> int:

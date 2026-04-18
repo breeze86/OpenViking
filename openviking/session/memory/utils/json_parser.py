@@ -452,7 +452,7 @@ def parse_json_with_stability(
     # Layer 4 & 5: Validate with model
     try:
         # First try direct model validation
-        return model_class.model_validate(parsed_data), None
+        return model_class.model_validate(parsed_data, strict=False), None
     except Exception as e:
         logger.warning(f"Direct model validation failed, trying parse_value_with_tolerance: {e}")
         logger.warning(f"content={content}")
@@ -472,7 +472,7 @@ def parse_json_with_stability(
                         continue
 
             # Now try validating with the tolerant data
-            return model_class.model_validate(tolerant_data), None
+            return model_class.model_validate(tolerant_data, strict=False), None
         except Exception as e2:
             return None, f"Model validation failed even after tolerance: {e} (fallback: {e2})"
 

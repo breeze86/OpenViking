@@ -176,12 +176,14 @@ After exploring, analyze the conversation and output ALL memory write/edit/delet
             all_lines = tool_lines + text_lines
             return "\n".join(all_lines) if all_lines else msg.content
 
+        def format_message_header(msg: Message, idx: int) -> str:
+            """Format message header with role and role_id."""
+            role_id_display = msg.role_id if msg.role_id else msg.role
+            return f"[{idx}][{msg.role}][{role_id_display}]: {format_message_with_parts(msg)}"
+
         conversation_sections.append(
             "\n".join(
-                [
-                    f"[{idx}][{msg.role}]: {format_message_with_parts(msg)}"
-                    for idx, msg in enumerate(messages)
-                ]
+                [format_message_header(msg, idx) for idx, msg in enumerate(messages)]
             )
         )
 
@@ -225,14 +227,13 @@ After exploring, analyze the conversation and output ALL memory write/edit/delet
         ls_dirs = set()  # directories to ls (for multi-file schemas)
         read_files = set()  # files to read directly (for single-file schemas)
         overview_files = set()  # .overview.md files to read
-
+        # Replace variables in directory path with actual user/agent space
+        user_space = user_space_fragment(ctx) if ctx and ctx.user else "default"
+        agent_space = agent_space_fragment(ctx) if ctx and ctx.user else "default"
         for schema in schemas:
             if not schema.directory:
                 continue
 
-            # Replace variables in directory path with actual user/agent space
-            user_space = user_space_fragment(ctx) if ctx and ctx.user else "default"
-            agent_space = agent_space_fragment(ctx) if ctx and ctx.user else "default"
             import jinja2
 
             env = jinja2.Environment(autoescape=False)

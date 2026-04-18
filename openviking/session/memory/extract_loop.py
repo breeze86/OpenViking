@@ -54,6 +54,7 @@ class ExtractLoop:
         max_iterations: int = 3,
         ctx: Optional[RequestContext] = None,
         context_provider: Optional[Any] = None,  # ExtractContextProvider
+        enable_isolation: bool = True,
     ):
         """
         Initialize the ExtractLoop.
@@ -65,6 +66,7 @@ class ExtractLoop:
             max_iterations: Maximum number of ReAct iterations (default: 5)
             ctx: Request context
             context_provider: ExtractContextProvider - 必须提供（由 provider 加载 schema）
+            enable_isolation: 是否启用记忆隔离机制（默认启用）
         """
         self.vlm = vlm
         self.viking_fs = viking_fs or get_viking_fs()
@@ -72,6 +74,8 @@ class ExtractLoop:
         self.max_iterations = max_iterations
         self.ctx = ctx
         self.context_provider = context_provider
+        self.enable_isolation = enable_isolation
+        self._isolation_handler = None
 
         # Schema 生成器（在 run() 中初始化）
         self.schema_model_generator = None
@@ -130,6 +134,20 @@ class ExtractLoop:
         for schema in schemas:
             self._expected_fields.append(schema.memory_type)
 
+        # Initialize MemoryIsolationHandler (if enabled)
+        if self.enable_isolation and self.ctx:
+            from openviking.session.memory.memory_isolation_handler import (
+                MemoryIsolationHandler,
+            )
+
+            self._isolation_handler = MemoryIsolationHandler(self.ctx, self._extract_context)
+            self._isolation_handler.load_participants()
+            logger.info(
+                f"MemoryIsolationHandler initialized with participants: "
+                f"users={self._isolation_handler.get_participant_user_ids()}, "
+                f"agents={self._isolation_handler.get_participant_agent_ids()}"
+            )
+
         # 预计算 operations_model
         self._operations_model = self.schema_model_generator.create_structured_operations_model()
 
@@ -184,6 +202,7 @@ The final output of the model must strictly follow the JSON Schema format shown 
                         if uri:
                             self._read_files.add(uri)
                 except (json.JSONDecodeError, AttributeError):
+                    logger.exception("parse msg fail")
                     pass
 
         while iteration < max_iterations:

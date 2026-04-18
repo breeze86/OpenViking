@@ -248,7 +248,7 @@ class MemorySearchTool(MemoryTool):
                 query,
                 target_uri=target_uri,
                 limit=limit + 10,
-                ctx=ctx,
+                ctx=ctx.request_ctx,
             )
             return optimize_search_result(search_result.to_dict(), limit=limit)
         except Exception as e:
