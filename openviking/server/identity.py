@@ -19,8 +19,8 @@ class Role(str, Enum):
 class AccountNamespacePolicy:
     """Account-level namespace isolation policy."""
 
-    isolate_user_scope_by_agent: bool = True
-    isolate_agent_scope_by_user: bool = True
+    isolate_user_scope_by_agent: bool = False
+    isolate_agent_scope_by_user: bool = False
 
     @classmethod
     def from_dict(cls, data: Optional[dict]) -> "AccountNamespacePolicy":

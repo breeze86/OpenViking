@@ -10,9 +10,10 @@ import json
 import os
 from typing import TYPE_CHECKING, Any, Dict, List
 
-from openviking.core.namespace import agent_space_fragment, user_space_fragment
+from openviking.core.namespace import to_user_space, to_agent_space
 from openviking.server.identity import RequestContext
 from openviking.session.memory.core import ExtractContextProvider
+from openviking.session.memory.memory_isolation_handler import MemoryIsolationHandler, RoleScope
 from openviking.session.memory.memory_type_registry import MemoryTypeRegistry
 from openviking.session.memory.tools import (
     add_tool_call_pair_to_messages,
@@ -31,13 +32,16 @@ if TYPE_CHECKING:
 class SessionExtractContextProvider(ExtractContextProvider):
     """会话提取 Provider - 从会话消息中提取记忆"""
 
-    def __init__(self, messages: Any, latest_archive_overview: str = ""):
+    def __init__(self, messages: Any, latest_archive_overview: str = "", isolation_handler: MemoryIsolationHandler = None):
         self.messages = messages
         self.latest_archive_overview = latest_archive_overview
         self._output_language = self._detect_language()
         self._registry = None  # 延迟加载
         self._schema_directories = None
         self._extract_context = None  # 缓存 ExtractContext 实例
+        self._isolation_handler = isolation_handler
+
+
 
     def get_extract_context(self) -> "ExtractContext":
         """获取或创建 ExtractContext 实例（缓存）"""
@@ -226,10 +230,10 @@ After exploring, analyze the conversation and output ALL memory write/edit/delet
         # Step 1: Separate schemas into multi-file (ls) and single-file (direct read)
         ls_dirs = set()  # directories to ls (for multi-file schemas)
         read_files = set()  # files to read directly (for single-file schemas)
-        overview_files = set()  # .overview.md files to read
-        # Replace variables in directory path with actual user/agent space
-        user_space = user_space_fragment(ctx) if ctx and ctx.user else "default"
-        agent_space = agent_space_fragment(ctx) if ctx and ctx.user else "default"
+
+        rolescope: RoleScope = self._isolation_handler.get_read_scope()
+        policy = ctx.namespace_policy
+
         for schema in schemas:
             if not schema.directory:
                 continue
@@ -238,30 +242,26 @@ After exploring, analyze the conversation and output ALL memory write/edit/delet
 
             env = jinja2.Environment(autoescape=False)
             template = env.from_string(schema.directory)
-            dir_path = template.render(user_space=user_space, agent_space=agent_space)
-
-            # Always add .overview.md to read list
-            overview_files.add(f"{dir_path}/.overview.md")
 
             # 根据 operation_mode 决定是否需要 ls 和读取其他文件
             if schema.operation_mode == "add_only":
-                # 只新增，不需要查看之前的记忆列表，只需要读取 .overview.md
                 continue
 
-            # Check if filename_template has variables (contains {{ xxx }})
-            has_variables = False
-            if schema.filename_template:
-                has_variables = (
-                    "{{" in schema.filename_template and "}}" in schema.filename_template
-                )
+            schema_dirs = set()
+            for user_id in rolescope.user_ids:
+                for agent_id in rolescope.agent_ids:
+                    user_space = to_user_space(policy, user_id, agent_id)
+                    agent_space = to_agent_space(policy, user_id, agent_id)
+                    dir_path = template.render(user_space=user_space, agent_space=agent_space)
+                    schema_dirs.add(dir_path)
 
-            if has_variables or not schema.filename_template:
-                # Multi-file schema or no filename template: ls the directory
-                ls_dirs.add(dir_path)
+            if schema.filename_has_variables():
+                for dir_path in schema_dirs:
+                    ls_dirs.add(dir_path)
             else:
-                # Single-file schema: directly read the specific file
-                file_uri = f"{dir_path}/{schema.filename_template}"
-                read_files.add(file_uri)
+                for dir_path in schema_dirs:
+                    file_uri = f"{dir_path}/{schema.filename_template}"
+                    read_files.add(file_uri)
 
         call_id_seq = 0
         # Step 2: Execute search for each ls directory (instead of ls)
@@ -274,19 +274,6 @@ After exploring, analyze the conversation and output ALL memory write/edit/delet
             request_ctx=ctx, transaction_handle=transaction_handle, default_search_uris=[]
         )
 
-        # for overview_uri in overview_files:
-        #     try:
-        #         result_str = await read_tool.execute(viking_fs, tool_ctx, uri=overview_uri)
-        #         add_tool_call_pair_to_messages(
-        #             messages=pre_fetch_messages,
-        #             call_id=call_id_seq,
-        #             tool_name="read",
-        #             params={"uri": overview_uri},
-        #             result=result_str,
-        #         )
-        #         call_id_seq += 1
-        #     except Exception as e:
-        #         logger.warning(f"Failed to read .overview.md: {e}")
 
         # 在每个之前 ls 的目录内执行 search（替换原来的 ls 操作）
         if search_tool and viking_fs and ls_dirs:

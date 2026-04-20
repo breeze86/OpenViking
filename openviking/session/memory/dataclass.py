@@ -60,6 +60,8 @@ class MemoryTypeSchema(BaseModel):
         "upsert", description="Operation mode: 'upsert' (default), 'add_only', or 'update_only'"
     )
 
+    def filename_has_variables(self):
+        return "{{" in self.filename_template and "}}" in self.filename_template
 
 class MemoryData(BaseModel):
     """Dynamic memory data."""

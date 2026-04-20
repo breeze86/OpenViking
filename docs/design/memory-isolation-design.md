@@ -238,12 +238,12 @@ def _calculate_target_for_role(
 
 ```python
 def calculate_memory_targets(
-    self,
-    role_id: Optional[str],
-    role_type: str,
-    memory_type: str,
-    is_events: bool = False,
-    events_range: Optional[dict] = None,
+        self,
+        role_id: Optional[str],
+        role_type: str,
+        memory_type: str,
+        is_events: bool = False,
+        events_range: Optional[dict] = None,
 ) -> List[MemoryTarget]:
     """计算记忆的写入目标目录"""
 
@@ -264,7 +264,7 @@ def calculate_memory_targets(
 
     # Case 2: events 类型 - 多归属
     # 从 events_range 涉及的 messages 中提取所有 role_id
-    target_role_ids = self._extract_role_ids_from_events_range(events_range)
+    target_role_ids = self._extract_role_ids_from_messages_range(events_range)
 
     # 如果无法从 range 确定，则使用所有参与者
     if not target_role_ids:

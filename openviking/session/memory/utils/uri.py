@@ -148,69 +148,7 @@ def validate_uri_template(memory_type: MemoryTypeSchema) -> bool:
     return True
 
 
-def collect_allowed_directories(
-    schemas: List[MemoryTypeSchema],
-    user_space: str = "default",
-    agent_space: str = "default",
-    extract_context: Any = None,
-) -> Set[str]:
-    """
-    Collect all allowed directories from activated schemas.
 
-    Args:
-        schemas: List of activated memory type schemas
-        user_space: User space to substitute for {{ user_space }}
-        agent_space: Agent space to substitute for {{ agent_space }}
-        extract_context: ExtractContext instance for template rendering
-
-    Returns:
-        Set of allowed directory paths with variables replaced
-    """
-    allowed_dirs = set()
-    for schema in schemas:
-        if schema.directory:
-            context = {"user_space": user_space, "agent_space": agent_space}
-            # Use unified render_template for consistent rendering
-            dir_path = render_template(schema.directory, context, extract_context)
-            allowed_dirs.add(dir_path)
-    return allowed_dirs
-
-
-def collect_allowed_path_patterns(
-    schemas: List[MemoryTypeSchema],
-    user_space: str = "default",
-    agent_space: str = "default",
-    extract_context: Any = None,
-) -> Set[str]:
-    """
-    Collect all allowed full path patterns from activated schemas.
-
-    Args:
-        schemas: List of activated memory type schemas
-        user_space: User space to substitute for {{ user_space }}
-        agent_space: Agent space to substitute for {{ agent_space }}
-        extract_context: ExtractContext instance for template rendering
-
-    Returns:
-        Set of allowed path patterns with {{ user_space }} and {{ agent_space }} replaced
-        (other variables like {{ topic }}, {{ tool_name }}, etc. remain as patterns)
-    """
-    allowed_patterns = set()
-    for schema in schemas:
-        if not schema.directory and not schema.filename_template:
-            continue
-        pattern_parts = []
-        if schema.directory:
-            pattern_parts.append(schema.directory)
-        if schema.filename_template:
-            pattern_parts.append(schema.filename_template)
-        if pattern_parts:
-            pattern = "/".join(pattern_parts)
-            context = {"user_space": user_space, "agent_space": agent_space}
-            # Use unified render_template for consistent rendering
-            pattern = render_template(pattern, context, extract_context)
-            allowed_patterns.add(pattern)
-    return allowed_patterns
 
 
 def _pattern_matches_uri(pattern: str, uri: str) -> bool:
@@ -276,32 +214,6 @@ def is_uri_allowed(
     return False
 
 
-def is_uri_allowed_for_schema(
-    uri: str,
-    schemas: List[MemoryTypeSchema],
-    user_space: str = "default",
-    agent_space: str = "default",
-    extract_context: Any = None,
-) -> bool:
-    """
-    Check if a URI is allowed for the given activated schemas.
-
-    Args:
-        uri: The URI to check
-        schemas: List of activated memory type schemas
-        user_space: User space to substitute for {{ user_space }}
-        agent_space: Agent space to substitute for {{ agent_space }}
-        extract_context: ExtractContext instance for template rendering
-
-    Returns:
-        True if the URI is allowed
-    """
-    allowed_dirs = collect_allowed_directories(schemas, user_space, agent_space, extract_context)
-    allowed_patterns = collect_allowed_path_patterns(
-        schemas, user_space, agent_space, extract_context
-    )
-    return is_uri_allowed(uri, allowed_dirs, allowed_patterns)
-
 
 from openviking.session.memory.utils.model import model_to_dict
 
@@ -332,8 +244,6 @@ def extract_uri_fields_from_flat_model(model: Any, schema: MemoryTypeSchema) -> 
 def resolve_flat_model_uri(
     flat_model: Any,
     registry: MemoryTypeRegistry,
-    user_space: str = "default",
-    agent_space: str = "default",
     memory_type: Optional[str] = None,
     extract_context: Any = None,
 ) -> str:
@@ -343,8 +253,6 @@ def resolve_flat_model_uri(
     Args:
         flat_model: Flat model instance with business fields
         registry: MemoryTypeRegistry to get schema
-        user_space: User space for substitution
-        agent_space: Agent space for substitution
         memory_type: Optional memory_type - if provided, use it instead of reading from model
         extract_context: ExtractContext instance for template rendering (same as content_template)
 
@@ -443,9 +351,8 @@ class ResolvedOperations:
 def resolve_all_operations(
     operations: Any,
     registry: MemoryTypeRegistry,
-    user_space: str = "default",
-    agent_space: str = "default",
     extract_context: Any = None,
+    isolation_handler: Any = None,
 ) -> ResolvedOperations:
     """
     Resolve URIs for all operations.
@@ -460,10 +367,12 @@ def resolve_all_operations(
         user_space: User space for substitution
         agent_space: Agent space for substitution
         extract_context: ExtractContext instance for template rendering (same as content_template)
+        isolation_handler: MemoryIsolationHandler instance for calculating correct user_space based on user_id
 
     Returns:
         ResolvedOperations with all URIs resolved
     """
+    logger.info(f"[resolve_all_operations] isolation_handler: {isolation_handler}")
     resolved = ResolvedOperations()
 
     # Check if using new per-memory_type format
@@ -477,17 +386,54 @@ def resolve_all_operations(
             items = value if isinstance(value, list) else [value]
             for item in items:
                 # Convert to dict for URI resolution
-                item_dict = dict(item) if hasattr(item, "model_dump") else dict(item)
+                item_dict = dict(item)
+
+                # Determine role_type based on schema directory
+                schema = registry.get(field_name)
+                directory = schema.directory if schema else ""
+                role_type = "user" if "{{ user_space }}" in directory else "agent"
+
+                # If isolation_handler is provided, use it to calculate correct user_space
+                if isolation_handler is not None:
+                    try:
+                        # Get targets based on operation (user_id or ranges)
+                        targets = isolation_handler.calculate_memory_targets(
+                            role_id=item_dict.get("user_id") or item_dict.get("agent_id"),
+                            role_type=role_type,
+                            memory_type=field_name,
+                            schema_directory=directory,
+                            operation=item_dict,
+                        )
+                        if targets:
+                            # For each target, generate a URI
+                            for target in targets:
+                                if role_type == "user":
+                                    target_user_space = target.user_space
+                                    target_agent_space = agent_space
+                                else:
+                                    target_user_space = target.user_space
+                                    target_agent_space = target.agent_space
+                                uri = resolve_flat_model_uri(
+                                    item_dict,
+                                    registry,
+                                    memory_type=field_name,
+                                    extract_context=extract_context,
+                                )
+                                resolved.operations.append(
+                                    ResolvedOperation(model=item_dict, uri=uri, memory_type=field_name)
+                                )
+                            continue
+                    except Exception as e:
+                        resolved.errors.append(f"Failed to calculate targets for {field_name}: {e}")
+
+                # Fallback: use default user_space
                 try:
                     uri = resolve_flat_model_uri(
                         item_dict,
                         registry,
-                        user_space,
-                        agent_space,
                         memory_type=field_name,
                         extract_context=extract_context,
                     )
-                    # All operations go to unified list - will read existing file first
                     resolved.operations.append(
                         ResolvedOperation(model=item_dict, uri=uri, memory_type=field_name)
                     )
@@ -514,55 +460,3 @@ def resolve_all_operations(
 
     return resolved
 
-
-def validate_operations_uris(
-    operations: Any,
-    schemas: List[MemoryTypeSchema],
-    registry: MemoryTypeRegistry,
-    user_space: str = "default",
-    agent_space: str = "default",
-    extract_context: Any = None,
-) -> Tuple[bool, List[str]]:
-    """
-    Validate that all URIs in StructuredMemoryOperations are allowed.
-
-    Args:
-        operations: The StructuredMemoryOperations to validate
-        schemas: List of activated memory type schemas
-        registry: MemoryTypeRegistry for URI resolution
-        user_space: User space to substitute for {{ user_space }}
-        agent_space: Agent space to substitute for {{ agent_space }}
-        extract_context: ExtractContext instance for template rendering
-
-    Returns:
-        Tuple of (is_valid, list of error messages)
-    """
-    allowed_dirs = collect_allowed_directories(schemas, user_space, agent_space, extract_context)
-    allowed_patterns = collect_allowed_path_patterns(
-        schemas, user_space, agent_space, extract_context
-    )
-
-    errors = []
-
-    # First resolve all URIs
-    resolved = resolve_all_operations(
-        operations, registry, user_space, agent_space, extract_context
-    )
-
-    if resolved.has_errors():
-        errors.extend(resolved.errors)
-    else:
-        # Validate resolved URIs - all operations use unified list
-        for resolved_op in resolved.operations:
-            if not is_uri_allowed(resolved_op.uri, allowed_dirs, allowed_patterns):
-                errors.append(f"Operation URI not allowed: {resolved_op.uri}")
-
-        for _op, uri in resolved.edit_overview_operations:
-            if not is_uri_allowed(uri, allowed_dirs, allowed_patterns):
-                errors.append(f"Edit overview operation URI not allowed: {uri}")
-
-        for _uri_str, uri in resolved.delete_operations:
-            if not is_uri_allowed(uri, allowed_dirs, allowed_patterns):
-                errors.append(f"Delete operation URI not allowed: {uri}")
-
-    return len(errors) == 0, errors

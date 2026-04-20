@@ -18,13 +18,14 @@ from openviking_cli.utils import get_logger
 logger = get_logger(__name__)
 
 
-@dataclass
-class Participant:
-    """参与者信息"""
 
-    role_id: str  # user 或 agent 的 ID
-    role_type: str  # "user" 或 "agent"
-    account_id: str
+
+@dataclass
+class RoleScope:
+    """Role 作用范围 - 从 messages 推断的可访问范围"""
+
+    user_ids: List[str]  # 参与者中的 user_id 列表
+    agent_ids: List[str]  # 参与者中的 agent_id 列表
 
 
 @dataclass
@@ -32,11 +33,8 @@ class MemoryTarget:
     """记忆写入目标"""
 
     uri: str  # 完整的 canonical URI
-    owner_user_id: Optional[str]
-    owner_agent_id: Optional[str]
     user_space: str  # 用于 URI 生成
     agent_space: str  # 用于 URI 生成
-
 
 class MemoryIsolationHandler:
     """Memory isolation handler."""
@@ -44,89 +42,82 @@ class MemoryIsolationHandler:
     def __init__(self, ctx: RequestContext, extract_context: Any):
         self.ctx = ctx
         self._extract_context = extract_context
-        self._participants: List[Participant] = []
-        self._participants_loaded = False
 
-    def load_participants(self) -> None:
-        """
-        Load participants from extract_context.messages.
 
-        Iterates through all messages and extracts participants:
-        - role="user" -> role_id is user_id
-        - role="assistant" -> role_id is agent_id
-        """
+    def get_read_scope(self) -> RoleScope:
+        user_ids = set()
+        agent_ids = set()
+
         messages = self._extract_context.messages if self._extract_context else []
-        seen_users: Set[str] = set()
-        seen_agents: Set[str] = set()
-
         for msg in messages:
             role = msg.role
             role_id = msg.role_id
-
             if not role_id:
                 continue
-
             if role == "user":
-                if role_id not in seen_users:
-                    seen_users.add(role_id)
-                    self._participants.append(
-                        Participant(
-                            role_id=role_id,
-                            role_type="user",
-                            account_id=self.ctx.account_id,
-                        )
-                    )
+                user_ids.add(role_id)
             elif role == "assistant":
-                if role_id not in seen_agents:
-                    seen_agents.add(role_id)
-                    self._participants.append(
-                        Participant(
-                            role_id=role_id,
-                            role_type="agent",
-                            account_id=self.ctx.account_id,
-                        )
-                    )
+                agent_ids.add(role_id)
 
-        # Fallback to ctx defaults if no participants found
-        if not self._participants:
-            logger.warning(
-                f"No participants extracted from messages, using ctx defaults: "
-                f"user_id={self.ctx.user.user_id}, agent_id={self.ctx.user.agent_id}"
-            )
-            self._participants.append(
-                Participant(
-                    role_id=self.ctx.user.user_id,
-                    role_type="user",
-                    account_id=self.ctx.account_id,
-                )
-            )
-            self._participants.append(
-                Participant(
-                    role_id=self.ctx.user.agent_id,
-                    role_type="agent",
-                    account_id=self.ctx.account_id,
-                )
-            )
-
-        self._participants_loaded = True
-        logger.info(
-            f"Loaded {len(self._participants)} participants: "
-            f"users={[p.role_id for p in self._participants if p.role_type == 'user']}, "
-            f"agents={[p.role_id for p in self._participants if p.role_type == 'agent']}"
-        )
-        logger.info(
-            f"Loaded {len(self._participants)} participants: "
-            f"users={[p.role_id for p in self._participants if p.role_type == 'user']}, "
-            f"agents={[p.role_id for p in self._participants if p.role_type == 'agent']}"
+        return RoleScope(
+            user_ids=list(user_ids),
+            agent_ids=list(agent_ids),
         )
 
-    def get_participant_user_ids(self) -> List[str]:
-        """获取所有参与者的 user_id 列表"""
-        return [p.role_id for p in self._participants if p.role_type == "user"]
+    def needs_explicit_user_id(
+        self,
+        schema_directory: str,
+        isolate_agent_scope_by_user: bool,
+        has_ranges: bool,
+    ) -> bool:
+        """
+        判断某个 memory_type 是否需要 LLM 明确输出 user_id。
 
-    def get_participant_agent_ids(self) -> List[str]:
-        """获取所有参与者的 agent_id 列表"""
-        return [p.role_id for p in self._participants if p.role_type == "agent"]
+        Args:
+            schema_directory: schema 的 directory 模板
+            isolate_agent_scope_by_user: policy 配置
+            has_ranges: operation 是否有 ranges 字段
+
+        Returns:
+            True 表示需要 LLM 输出 user_id
+        """
+        # 有 ranges 就不需要
+        if has_ranges:
+            return False
+
+        depends_on_user_space = "{{ user_space }}" in schema_directory
+        depends_on_agent_space = "{{ agent_space }}" in schema_directory
+
+        # 如果依赖 user_space，必须输出 user_id
+        if depends_on_user_space:
+            return True
+
+        # 如果依赖 agent_space 且 isolate_agent_scope_by_user=True，需要 user_id
+        if depends_on_agent_space and isolate_agent_scope_by_user:
+            return True
+
+        return False
+
+    def needs_explicit_agent_id(
+        self,
+        schema_directory: str,
+        isolate_user_scope_by_agent: bool,
+    ) -> bool:
+        """
+        判断某个 memory_type 是否需要 LLM 明确输出 agent_id。
+        """
+        depends_on_user_space = "{{ user_space }}" in schema_directory
+        depends_on_agent_space = "{{ agent_space }}" in schema_directory
+
+        # 如果依赖 agent_space，必须输出 agent_id
+        if depends_on_agent_space:
+            return True
+
+        # 如果依赖 user_space 且 isolate_user_scope_by_agent=True，需要 agent_id
+        if depends_on_user_space and isolate_user_scope_by_agent:
+            return True
+
+        return False
 
     def validate_role_id(self, role_id: str, role_type: str) -> bool:
         """
@@ -145,6 +136,39 @@ class MemoryIsolationHandler:
             return self.get_participant_user_ids()
         else:
             return self.get_participant_agent_ids()
+
+    def get_participant_user_ids(self) -> List[str]:
+        """获取参与者中的 user_id 列表"""
+        return self.get_read_scope().user_ids
+
+    def get_participant_agent_ids(self) -> List[str]:
+        """获取参与者中的 agent_id 列表"""
+        return self.get_read_scope().agent_ids
+
+    def fulfill_user_id_and_agent_id(
+        self, item_dict: Dict[str, Any], role_scope: Optional[RoleScope] = None
+    ) -> None:
+        """
+        填充 item_dict 中的 user_id 和 agent_id 字段。
+
+        如果 item_dict 中没有这些字段，从 role_scope 或 read_scope 中填充。
+
+        Args:
+            item_dict: 包含 memory 数据的字典
+            role_scope: 可选的 role scope
+        """
+        if role_scope is None:
+            role_scope = self.get_read_scope()
+
+        # 填充 user_id
+        if "user_id" not in item_dict or not item_dict.get("user_id"):
+            if role_scope.user_ids:
+                item_dict["user_id"] = role_scope.user_ids[0]
+
+        # 填充 agent_id
+        if "agent_id" not in item_dict or not item_dict.get("agent_id"):
+            if role_scope.agent_ids:
+                item_dict["agent_id"] = role_scope.agent_ids[0]
 
     def _get_default_user_id(self) -> str:
         """获取默认的 user_id（当前 ctx 的 user_id）"""
@@ -219,18 +243,27 @@ class MemoryIsolationHandler:
 
         else:  # role_type == "agent"
             agent_space = self._calculate_agent_space(role_id)
-            user_space = self.ctx.user.user_id  # 默认 user_id
+            logger.info(
+                f"[MemoryIsolation] agent type: role_id={role_id}, isolate_agent_scope_by_user={policy.isolate_agent_scope_by_user}"
+            )
 
             if policy.isolate_agent_scope_by_user:
+                # 需要 user 维度，从对话参与者获取 user_id
+                participant_user_ids = self.get_participant_user_ids()
+                logger.info(f"[MemoryIsolation] participant_user_ids={participant_user_ids}")
+                user_space = participant_user_ids[0] if participant_user_ids else None
+                owner_user_id = user_space
                 # URI 形如 viking://agent/{agent_id}/user/{user_id}/memories/{memory_type}
-                base_uri = f"viking://agent/{role_id}/user/{self._get_default_user_id()}"
-                owner_agent_id = role_id
-                owner_user_id = self._get_default_user_id()
+                base_uri = f"viking://agent/{role_id}/user/{user_space}"
             else:
+                # 不需要 user 维度
+                user_space = None
+                owner_user_id = None
                 # URI 形如 viking://agent/{agent_id}/memories/{memory_type}
                 base_uri = f"viking://agent/{role_id}"
-                owner_agent_id = role_id
-                owner_user_id = None
+
+            owner_agent_id = role_id
+            logger.info(f"[MemoryIsolation] agent target: user_space={user_space}, base_uri={base_uri}")
 
             return MemoryTarget(
                 uri=f"{base_uri}/memories/{memory_type}",
@@ -251,47 +284,68 @@ class MemoryIsolationHandler:
                 self.ctx.user.agent_id, "agent", memory_type
             )
 
-    def _extract_role_ids_from_events_range(
-        self, events_range: Optional[Dict[str, Any]]
+    def _extract_role_ids_from_messages_range(
+        self, ranges: Optional[str]
     ) -> List[str]:
         """
         从 events 的 ranges 字段提取涉及的 role_id。
 
-        简化实现：如果有 ranges 信息，提取范围内的所有消息的参与者。
-        如果无法解析，返回空列表（将使用所有参与者）。
+        解析 ranges 格式，提取范围内的所有 user 角色的消息参与者。
         """
-        if not events_range:
+        if not ranges or not self._extract_context:
             return []
 
-        # ranges 格式: "0-3,40-45" 或 "[0, 1, 2, 3]"
-        # 这里简化处理：假设调用方已经传入需要归属的 user_id 列表
-        # 实际实现可以从 extract_context.read_message_ranges() 获取消息，再提取 role_id
-        return []
+        # 复用 ExtractContext.read_message_ranges() 解析 ranges
+        from openviking.session.memory.memory_updater import ExtractContext
 
-    def _get_user_ids_from_operation(
-        self, operation: Optional[Dict[str, Any]]
+        if not isinstance(self._extract_context, ExtractContext):
+            # 如果不是 ExtractContext 实例，尝试直接访问 messages
+            messages = getattr(self._extract_context, "messages", None)
+            if not messages:
+                return []
+        else:
+            # 使用 ExtractContext 的方法解析 ranges
+            msg_range = self._extract_context.read_message_ranges(ranges)
+            messages = msg_range.elements
+
+        # 从消息中提取 user 角色的 role_id
+        user_ids: Set[str] = set()
+        for msg in messages:
+            if hasattr(msg, "role") and msg.role == "user" and hasattr(msg, "role_id") and msg.role_id:
+                user_ids.add(msg.role_id)
+
+        return list(user_ids)
+
+    def _get_role_ids_from_operation(
+        self, operation: Optional[Dict[str, Any]], role_type: str = "user"
     ) -> List[str]:
         """
-        从 operation 中提取 user_ids。
+        从 operation 中提取 role_ids。
 
-        根据字段名自动推断：
-        - user_id: 单个用户
-        - ranges: 从 message range 获取
-        - 都没有: 返回空列表（调用方会使用所有参与者）
+        根据 role_type 决定提取策略：
+        - user: 从 user_id 或 ranges 字段提取
+        - agent: 从 agent_id 字段提取
         """
         if not operation:
             return []
 
-        # 1. 如果 operation 返回了 user_id 字段（单个用户）
-        if "user_id" in operation:
-            user_id = operation.get("user_id")
-            if user_id:
-                return [user_id]
+        if role_type == "user":
+            # 1. 如果 operation 返回了 user_id 字段（单个用户）
+            if "user_id" in operation:
+                user_id = operation.get("user_id")
+                if user_id:
+                    return [user_id]
 
-        # 2. 如果有 ranges 字段 → 从 range 获取
-        if "ranges" in operation:
-            ranges = operation.get("ranges")
-            return self._extract_role_ids_from_events_range(ranges)
+            # 2. 如果有 ranges 字段 → 从 range 获取
+            if "ranges" in operation:
+                ranges = operation.get("ranges")
+                return self._extract_role_ids_from_messages_range(ranges)
+        else:
+            # agent 类型: 从 agent_id 字段提取
+            if "agent_id" in operation:
+                agent_id = operation.get("agent_id")
+                if agent_id:
+                    return [agent_id]
 
         return []
 
@@ -300,6 +354,7 @@ class MemoryIsolationHandler:
         role_id: Optional[str],
         role_type: str,
         memory_type: str,
+        schema_directory: str,
         operation: Optional[Dict[str, Any]] = None,
     ) -> List[MemoryTarget]:
         """
@@ -309,24 +364,68 @@ class MemoryIsolationHandler:
             role_id: 记忆归属的 role_id（向后兼容，单个用户时使用）
             role_type: "user" 或 "agent"
             memory_type: 记忆类型（events, preferences, entities 等）
+            schema_directory: schema 的 directory 模板，用于判断依赖
             operation: LLM 返回的 operation 字典，从中自动提取 user_id/user_ids/ranges
 
         Returns:
             MemoryTarget 列表，每个目标对应一个写入目录
         """
-        # 从 operation 中提取 user_ids
-        target_role_ids = self._get_user_ids_from_operation(operation)
+        policy = self.ctx.namespace_policy
+        has_ranges = operation and "ranges" in operation if operation else False
 
-        # 如果无法从 operation 确定，使用 role_id 参数（向后兼容）
-        if not target_role_ids and role_id:
-            target_role_ids = [role_id]
+        logger.info(
+            f"[MemoryIsolation] calculate_memory_targets: role_id={role_id}, "
+            f"role_type={role_type}, memory_type={memory_type}, directory={schema_directory}, "
+            f"policy.isolate_user_scope_by_agent={policy.isolate_user_scope_by_agent}, "
+            f"policy.isolate_agent_scope_by_user={policy.isolate_agent_scope_by_user}, "
+            f"has_ranges={has_ranges}"
+        )
 
-        # 如果仍然无法确定，使用所有参与者
-        if not target_role_ids:
-            if role_type == "user":
-                target_role_ids = self.get_participant_user_ids()
+        # 获取 read_scope
+        read_scope = self.get_read_scope()
+
+        # 根据新逻辑决定 target_role_ids
+        target_role_ids: List[str] = []
+
+        if role_type == "user":
+            # 判断是否需要明确 user_id
+            needs_user_id = self.needs_explicit_user_id(
+                schema_directory,
+                policy.isolate_agent_scope_by_user,
+                has_ranges,
+            )
+
+            if not needs_user_id:
+                # user_ids <= 1，不需要 LLM 输出
+                target_role_ids = read_scope.user_ids[:1] if read_scope.user_ids else []
+                logger.info(f"[MemoryIsolation] no explicit user_id needed, using read_scope.user_ids[:1]={target_role_ids}")
             else:
-                target_role_ids = self.get_participant_agent_ids()
+                # 需要从 operation 提取
+                target_role_ids = self._get_role_ids_from_operation(operation, "user")
+                if not target_role_ids and role_id:
+                    target_role_ids = [role_id]
+                if not target_role_ids:
+                    target_role_ids = read_scope.user_ids
+                logger.info(f"[MemoryIsolation] needs user_id, extracted target_role_ids={target_role_ids}")
+        else:
+            # agent 类型
+            needs_agent_id = self.needs_explicit_agent_id(
+                schema_directory,
+                policy.isolate_user_scope_by_agent,
+            )
+
+            if not needs_agent_id:
+                # agent_ids <= 1，不需要 LLM 输出
+                target_role_ids = read_scope.agent_ids[:1] if read_scope.agent_ids else []
+                logger.info(f"[MemoryIsolation] no explicit agent_id needed, using read_scope.agent_ids[:1]={target_role_ids}")
+            else:
+                # 需要从 operation 提取
+                target_role_ids = self._get_role_ids_from_operation(operation, "agent")
+                if not target_role_ids and role_id:
+                    target_role_ids = [role_id]
+                if not target_role_ids:
+                    target_role_ids = read_scope.agent_ids
+                logger.info(f"[MemoryIsolation] needs agent_id, extracted target_role_ids={target_role_ids}")
 
         # 校验所有 role_id 并生成 targets
         targets = []
@@ -334,14 +433,15 @@ class MemoryIsolationHandler:
             # 校验 role_id
             if not self.validate_role_id(uid, role_type):
                 valid_ids = self.get_valid_role_ids(role_type)
-                raise ValueError(
-                    f"role_id '{uid}' is not in session participants. "
-                    f"Valid {role_type} participants: {valid_ids}"
+                logger.warning(
+                    f"[MemoryIsolation] validate_role_id failed: uid={uid}, valid_ids={valid_ids}"
                 )
+                continue
             targets.append(self._calculate_target_for_role(uid, role_type, memory_type))
 
         if not targets:
             # fallback 到默认目标
+            logger.warning(f"[MemoryIsolation] no targets, using fallback")
             targets = [self._get_default_target(role_type, memory_type)]
 
         return targets

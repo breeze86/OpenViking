@@ -15,6 +15,7 @@ from openviking.core.namespace import agent_space_fragment, user_space_fragment
 from openviking.message import Message
 from openviking.server.identity import RequestContext
 from openviking.session.memory import ExtractLoop, MemoryUpdater
+from openviking.session.memory.memory_isolation_handler import MemoryIsolationHandler
 from openviking.session.memory.utils.json_parser import JsonUtils
 from openviking.storage import VikingDBManager
 from openviking.storage.viking_fs import get_viking_fs
@@ -44,6 +45,7 @@ class SessionCompressorV2:
         ctx: Optional[RequestContext] = None,
         messages: Optional[List] = None,
         latest_archive_overview: str = "",
+        isolation_handler: Optional[MemoryIsolationHandler] = None,
     ) -> ExtractLoop:
         """Create new ExtractLoop instance with current ctx.
 
@@ -62,6 +64,7 @@ class SessionCompressorV2:
         context_provider = SessionExtractContextProvider(
             messages=messages,
             latest_archive_overview=latest_archive_overview,
+            isolation_handler=isolation_handler,
         )
 
         return ExtractLoop(
@@ -69,6 +72,7 @@ class SessionCompressorV2:
             viking_fs=viking_fs,
             ctx=ctx,
             context_provider=context_provider,
+            isolation_handler=isolation_handler,
         )
 
     def _get_or_create_updater(self, registry, transaction_handle=None) -> MemoryUpdater:
@@ -137,11 +141,21 @@ class SessionCompressorV2:
             logger.warning("VikingFS or AGFS not available, running without lock mechanism")
 
         try:
+            # Create extract context from messages
+            from openviking.session.memory.memory_updater import ExtractContext
+
+            extract_context = ExtractContext(messages)
+
+            # Create MemoryIsolationHandler
+            isolation_handler = MemoryIsolationHandler(ctx, extract_context)
+            # load_participants 在 context_provider 需要 rolescope 时调用
+
             # 获取所有记忆 schema 目录并加锁（仅在有锁管理器时）
             orchestrator = self._get_or_create_react(
                 ctx=ctx,
                 messages=messages,
                 latest_archive_overview=latest_archive_overview,
+                isolation_handler=isolation_handler,
             )
             if lock_manager:
                 # 基于 provider 的 schemas 生成目录列表
@@ -219,14 +233,9 @@ class SessionCompressorV2:
                 f"delete={len(operations.delete_uris)}"
             )
 
-            # Create extract context from messages
-            from openviking.session.memory.memory_updater import ExtractContext
-
-            extract_context = ExtractContext(messages)
-
-            # Apply operations
+            # Apply operations with isolation_handler
             result = await updater.apply_operations(
-                operations, ctx, registry=registry, extract_context=extract_context
+                operations, ctx, registry=registry, extract_context=extract_context, isolation_handler=isolation_handler
             )
 
             tracer.info(

@@ -141,7 +141,8 @@ class MessageRange:
             if isinstance(elem, str):
                 result.append(elem)
             else:
-                result.append(f"[{elem.role}]: {elem.content}")
+                role_id = elem.role_id if elem.role_id else elem.role
+                result.append(f"[{role_id}]: {elem.content}")
         return "\n".join(result)
 
     def _first_message_time(self) -> str | None:
@@ -245,6 +246,7 @@ class MemoryUpdater:
         ctx: RequestContext,
         registry: Optional[MemoryTypeRegistry] = None,
         extract_context: Any = None,
+        isolation_handler: Any = None,
     ) -> MemoryUpdateResult:
         """
         Apply MemoryOperations directly using the flat model format.
@@ -255,6 +257,8 @@ class MemoryUpdater:
             operations: StructuredMemoryOperations from LLM with per-memory_type fields (e.g., soul, identity)
             ctx: Request context
             registry: Optional MemoryTypeRegistry for URI resolution
+            extract_context: ExtractContext for template rendering
+            isolation_handler: MemoryIsolationHandler for calculating correct user_space based on user_id
 
         Returns:
             MemoryUpdateResult with changes made
@@ -271,17 +275,13 @@ class MemoryUpdater:
         if not resolved_registry:
             raise ValueError("MemoryTypeRegistry is required for URI resolution")
 
-        # Get actual user/agent space from ctx
-        user_space = user_space_fragment(ctx) if ctx and ctx.user else "default"
-        agent_space = agent_space_fragment(ctx) if ctx and ctx.user else "default"
-
         # Resolve all URIs first (pass extract_context for template rendering)
+        logger.info(f"[MemoryUpdater] applying operations, isolation_handler={isolation_handler}")
         resolved_ops = resolve_all_operations(
             operations,
             resolved_registry,
-            user_space=user_space,
-            agent_space=agent_space,
             extract_context=extract_context,
+            isolation_handler=isolation_handler,
         )
 
         if resolved_ops.has_errors():

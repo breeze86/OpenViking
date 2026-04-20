@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from openviking.core.namespace import agent_space_fragment, user_space_fragment
 from openviking.models.vlm.base import VLMBase
 from openviking.server.identity import RequestContext
+from openviking.session.memory.memory_isolation_handler import RoleScope
 from openviking.session.memory.schema_model_generator import (
     SchemaModelGenerator,
     SchemaPromptGenerator,
@@ -26,7 +27,6 @@ from openviking.session.memory.utils import (
     parse_json_with_stability,
     parse_memory_file_with_fields,
     pretty_print_messages,
-    validate_operations_uris,
 )
 from openviking.storage.viking_fs import VikingFS, get_viking_fs
 from openviking.telemetry import tracer
@@ -54,7 +54,7 @@ class ExtractLoop:
         max_iterations: int = 3,
         ctx: Optional[RequestContext] = None,
         context_provider: Optional[Any] = None,  # ExtractContextProvider
-        enable_isolation: bool = True,
+        isolation_handler: Optional[Any] = None,
     ):
         """
         Initialize the ExtractLoop.
@@ -66,7 +66,6 @@ class ExtractLoop:
             max_iterations: Maximum number of ReAct iterations (default: 5)
             ctx: Request context
             context_provider: ExtractContextProvider - 必须提供（由 provider 加载 schema）
-            enable_isolation: 是否启用记忆隔离机制（默认启用）
         """
         self.vlm = vlm
         self.viking_fs = viking_fs or get_viking_fs()
@@ -74,13 +73,12 @@ class ExtractLoop:
         self.max_iterations = max_iterations
         self.ctx = ctx
         self.context_provider = context_provider
-        self.enable_isolation = enable_isolation
-        self._isolation_handler = None
+        # Use provided isolation_handler or create one in run()
+        self._isolation_handler = isolation_handler
 
         # Schema 生成器（在 run() 中初始化）
         self.schema_model_generator = None
         self.schema_prompt_generator = None
-        self._json_schema = None
 
         # 预计算：避免每次迭代重复计算
         self._tool_schemas: Optional[List[Dict[str, Any]]] = None
@@ -113,7 +111,7 @@ class ExtractLoop:
         self.schema_model_generator = SchemaModelGenerator(schemas)
         self.schema_prompt_generator = SchemaPromptGenerator(schemas)
         self.schema_model_generator.generate_all_models()
-        self._json_schema = self.schema_model_generator.get_llm_json_schema()
+
 
         # 预计算工具 schemas
         allowed_tools = self.context_provider.get_tools()
@@ -134,14 +132,13 @@ class ExtractLoop:
         for schema in schemas:
             self._expected_fields.append(schema.memory_type)
 
-        # Initialize MemoryIsolationHandler (if enabled)
-        if self.enable_isolation and self.ctx:
+        # Initialize MemoryIsolationHandler (if not provided)
+        if self._isolation_handler is None and self.ctx:
             from openviking.session.memory.memory_isolation_handler import (
                 MemoryIsolationHandler,
             )
 
             self._isolation_handler = MemoryIsolationHandler(self.ctx, self._extract_context)
-            self._isolation_handler.load_participants()
             logger.info(
                 f"MemoryIsolationHandler initialized with participants: "
                 f"users={self._isolation_handler.get_participant_user_ids()}, "
@@ -149,7 +146,13 @@ class ExtractLoop:
             )
 
         # 预计算 operations_model
-        self._operations_model = self.schema_model_generator.create_structured_operations_model()
+        role_scope = self._isolation_handler.get_read_scope() if self._isolation_handler else None
+
+
+
+        self._operations_model = self.schema_model_generator.create_structured_operations_model(role_scope)
+
+        json_schema = self._operations_model.model_json_schema()
 
         # Reset read files tracking for this run
         self._read_files.clear()
@@ -157,7 +160,7 @@ class ExtractLoop:
         # Build initial messages from provider
         import json
 
-        schema_str = json.dumps(self._json_schema, ensure_ascii=False)
+        schema_str = json.dumps(json_schema, ensure_ascii=False)
 
         messages = []
         # instruction() 返回字符串，需要包装成 message 格式
@@ -242,7 +245,8 @@ The final output of the model must strictly follow the JSON Schema format shown 
             # If model returned final operations, check if refetch is needed
             if operations is not None:
                 # Check if any write_uris target existing files that weren't read
-                refetch_uris = await self._check_unread_existing_files(operations)
+                refetch_uris = await self._check_unread_existing_files(operations,
+                                                                       role_scope=role_scope)
                 if refetch_uris:
                     tracer.info(f"Found unread existing files: {refetch_uris}, refetching...")
                     # Add refetch results to messages and continue loop
@@ -334,36 +338,7 @@ The final output of the model must strictly follow the JSON Schema format shown 
 
         return has_unknown_tool
 
-    def _validate_operations(self, operations: Any) -> None:
-        """
-        Validate that all operations have allowed URIs.
 
-        Args:
-            operations: The operations to validate
-
-        Raises:
-            ValueError: If any operation has a disallowed URI
-        """
-        # Get registry from provider (internal method)
-        registry = self.context_provider._get_registry()
-        schemas = self.context_provider.get_memory_schemas(self.ctx)
-
-        # Use pre-initialized extract_context
-        if not hasattr(self, "_extract_context") or self._extract_context is None:
-            raise ValueError("ExtractContext not initialized")
-
-        is_valid, errors = validate_operations_uris(
-            operations,
-            schemas,
-            registry,
-            user_space=user_space_fragment(self.ctx),
-            agent_space=agent_space_fragment(self.ctx),
-            extract_context=self._extract_context,
-        )
-        if not is_valid:
-            error_msg = "Invalid memory operations:\n" + "\n".join(f"  - {err}" for err in errors)
-            logger.error(error_msg)
-            raise ValueError(error_msg)
 
     async def _call_llm(
         self, messages: List[Dict[str, Any]]
@@ -448,8 +423,6 @@ The final output of the model must strictly follow the JSON Schema format shown 
                     logger.warning(f"Failed to parse memory operations: {error}")
                     return (None, None)
 
-                # Validate that all URIs are allowed
-                self._validate_operations(operations)
                 return (None, operations)
             except Exception as e:
                 logger.exception(f"Error parsing operations: {e}")
@@ -495,6 +468,7 @@ The final output of the model must strictly follow the JSON Schema format shown 
     async def _check_unread_existing_files(
         self,
         operations: Any,
+        role_scope: RoleScope
     ) -> List[str]:
         """Check if write operations target existing files that weren't read during ReAct."""
         memory_type_fields = getattr(operations, "_memory_type_fields", None)
@@ -513,13 +487,13 @@ The final output of the model must strictly follow the JSON Schema format shown 
             items = value if isinstance(value, list) else [value]
             for item in items:
                 # Convert to dict
-                item_dict = dict(item) if hasattr(item, "model_dump") else dict(item)
+                item_dict = dict(item)
+
+                self._isolation_handler.fulfill_user_id_and_agent_id(item_dict, role_scope)
                 try:
                     uri = resolve_flat_model_uri(
                         item_dict,
                         registry,
-                        user_space=user_space_fragment(self.ctx),
-                        agent_space=agent_space_fragment(self.ctx),
                         memory_type=field_name,
                         extract_context=self._extract_context,
                     )

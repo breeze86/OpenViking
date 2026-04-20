@@ -40,7 +40,6 @@ from openviking.session.memory.utils import (
     detect_language_from_conversation,
     generate_uri,
     is_uri_allowed,
-    is_uri_allowed_for_schema,
     pretty_print_messages,
     resolve_all_operations,
     validate_uri_template,
@@ -87,5 +86,4 @@ __all__ = [
     "validate_uri_template",
     "resolve_all_operations",
     "is_uri_allowed",
-    "is_uri_allowed_for_schema",
 ]
