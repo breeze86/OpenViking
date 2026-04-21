@@ -37,7 +37,7 @@ async def extract_skill_privacy_values(
     if not isinstance(values, dict):
         return {}
     return {
-        str(key): str(value)
+        str(key): "" if value is None else str(value)
         for key, value in values.items()
-        if value is not None and str(value).strip()
+        if str(key).strip()
     }
