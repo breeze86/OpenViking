@@ -21,6 +21,8 @@ IMPORTANT (v5.0 Architecture):
 """
 
 import logging
+import re
+from pathlib import PurePosixPath
 from typing import Optional
 
 from openviking.core.building_tree import BuildingTree
@@ -32,6 +34,8 @@ from openviking.utils import parse_code_hosting_url
 from openviking_cli.utils.uri import VikingURI
 
 logger = logging.getLogger(__name__)
+
+_ALLOWED_SEGMENT_RE = re.compile(r"[^A-Za-z0-9!\-_.\*'()]")
 
 
 class TreeBuilder:
@@ -58,6 +62,82 @@ class TreeBuilder:
     def __init__(self):
         """Initialize TreeBuilder."""
         pass
+
+    @staticmethod
+    def _sanitize_name_segment(segment: str) -> str:
+        sanitized = _ALLOWED_SEGMENT_RE.sub("_", segment)
+        return sanitized or "_"
+
+    @classmethod
+    def _dedupe_name(
+        cls,
+        name: str,
+        used_names: set[str],
+        *,
+        is_dir: bool,
+    ) -> str:
+        if is_dir:
+            base_name = cls._sanitize_name_segment(name)
+            candidate = base_name
+            index = 1
+            while candidate in used_names:
+                candidate = f"{base_name}_{index}"
+                index += 1
+            used_names.add(candidate)
+            return candidate
+
+        path = PurePosixPath(name)
+        suffixes = "".join(path.suffixes)
+        stem = name[: -len(suffixes)] if suffixes else name
+        safe_stem = cls._sanitize_name_segment(stem)
+        safe_suffix = "".join(cls._sanitize_name_segment(suffix) for suffix in path.suffixes)
+        candidate = f"{safe_stem}{safe_suffix}"
+        index = 1
+        while candidate in used_names:
+            candidate = f"{safe_stem}_{index}{safe_suffix}"
+            index += 1
+        used_names.add(candidate)
+        return candidate
+
+    async def _normalize_temp_tree(self, root_uri: str, ctx: RequestContext) -> str:
+        viking_fs = get_viking_fs()
+
+        async def _walk(uri: str, current_root_uri: str) -> str:
+            entries = await viking_fs.ls(uri, ctx=ctx)
+            visible_entries = [
+                entry for entry in entries if entry.get("name") not in ("", ".", "..")
+            ]
+
+            used_names: set[str] = set()
+            current_uri = uri
+            renamed_dirs: list[str] = []
+            for entry in visible_entries:
+                original_name = entry["name"]
+                target_name = self._dedupe_name(
+                    original_name,
+                    used_names,
+                    is_dir=bool(entry.get("isDir")),
+                )
+                if target_name == original_name:
+                    continue
+                old_uri = entry.get("uri", f"{current_uri.rstrip('/')}/{original_name}")
+                new_uri = f"{current_uri.rstrip('/')}/{target_name}"
+                await viking_fs.mv(old_uri, new_uri, ctx=ctx)
+                entry["name"] = target_name
+                entry["uri"] = new_uri
+                if old_uri == current_root_uri:
+                    current_root_uri = new_uri
+                if entry.get("isDir"):
+                    renamed_dirs.append(new_uri)
+
+            for entry in visible_entries:
+                if entry.get("isDir"):
+                    child_uri = entry.get("uri", f"{uri.rstrip('/')}/{entry['name']}")
+                    current_root_uri = await _walk(child_uri, current_root_uri)
+
+            return current_root_uri
+
+        return await _walk(root_uri, root_uri)
 
     def _get_base_uri(
         self, scope: str, source_path: Optional[str] = None, source_format: Optional[str] = None
@@ -141,10 +221,14 @@ class TreeBuilder:
             )
 
         original_name = doc_dirs[0]["name"]
-        doc_name = VikingURI.sanitize_segment(original_name)
         temp_doc_uri = f"{temp_uri}/{original_name}"  # use original name to find temp dir
-        if original_name != doc_name:
-            logger.debug(f"[TreeBuilder] Sanitized doc name: {original_name!r} -> {doc_name!r}")
+        sanitized_root_name = self._sanitize_name_segment(original_name)
+        if sanitized_root_name != original_name:
+            new_temp_doc_uri = f"{temp_uri}/{sanitized_root_name}"
+            await viking_fs.mv(temp_doc_uri, new_temp_doc_uri, ctx=ctx)
+            temp_doc_uri = new_temp_doc_uri
+        temp_doc_uri = await self._normalize_temp_tree(temp_doc_uri, ctx)
+        doc_name = temp_doc_uri.rstrip("/").split("/")[-1]
 
         # Check if source_path is a GitHub/GitLab URL and extract org/repo
         final_doc_name = doc_name
@@ -163,6 +247,7 @@ class TreeBuilder:
         else:
             effective_parent_uri = parent_uri or to_uri if use_to_as_parent else parent_uri
             if effective_parent_uri:
+                effective_parent_uri = effective_parent_uri.rstrip("/")
                 # Parent URI must exist and be a directory
                 try:
                     stat_result = await viking_fs.stat(effective_parent_uri, ctx=ctx)

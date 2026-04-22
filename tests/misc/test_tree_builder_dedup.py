@@ -108,6 +108,7 @@ class TestFinalizeFromTemp:
     @staticmethod
     def _make_fs(entries, existing_uris: set[str]):
         fs = MagicMock()
+        moved = []
 
         async def _ls(uri, **kwargs):
             return entries[uri]
@@ -117,8 +118,33 @@ class TestFinalizeFromTemp:
                 return {"name": uri.split("/")[-1], "isDir": True}
             raise FileNotFoundError(f"Not found: {uri}")
 
+        async def _mv(old_uri, new_uri, **kwargs):
+            moved.append((old_uri, new_uri))
+            for base_uri, listing in list(entries.items()):
+                for entry in listing:
+                    entry_uri = entry.get("uri", f"{base_uri.rstrip('/')}/{entry['name']}")
+                    if entry_uri == old_uri:
+                        old_name = entry["name"]
+                        new_name = new_uri.rstrip("/").split("/")[-1]
+                        entry["name"] = new_name
+                        entry["uri"] = new_uri
+                        if entry.get("isDir"):
+                            child_entries = entries.pop(old_uri, [])
+                            entries[new_uri] = child_entries
+                            for child in child_entries:
+                                child_uri = child.get(
+                                    "uri", f"{old_uri.rstrip('/')}/{child['name']}"
+                                )
+                                child["uri"] = child_uri.replace(old_uri, new_uri, 1)
+                        elif old_name != new_name:
+                            entry["uri"] = new_uri
+                        return
+            raise FileNotFoundError(old_uri)
+
         fs.ls = AsyncMock(side_effect=_ls)
         fs.stat = AsyncMock(side_effect=_stat)
+        fs.mv = AsyncMock(side_effect=_mv)
+        fs._moved = moved
         return fs
 
     @pytest.mark.asyncio
@@ -129,6 +155,7 @@ class TestFinalizeFromTemp:
 
         entries = {
             "viking://temp/import": [{"name": "tt_b", "isDir": True}],
+            "viking://temp/import/tt_b": [],
         }
         fs = self._make_fs(entries, {"viking://resources"})
         builder = TreeBuilder()
@@ -154,6 +181,7 @@ class TestFinalizeFromTemp:
 
         entries = {
             "viking://temp/import": [{"name": "tt_b", "isDir": True}],
+            "viking://temp/import/tt_b": [],
         }
         fs = self._make_fs(entries, {"viking://resources", "viking://resources/tt_b"})
         builder = TreeBuilder()
@@ -196,3 +224,82 @@ class TestFinalizeFromTemp:
         assert tree.root.uri == "viking://resources/aa"
         assert tree.root.temp_uri == "viking://temp/import/aa"
         assert tree._candidate_uri == "viking://resources/aa"
+
+    @pytest.mark.asyncio
+    async def test_finalize_from_temp_sanitizes_any_type_tree_names(self):
+        from openviking.parse.tree_builder import TreeBuilder
+        from openviking.server.identity import RequestContext, Role
+        from openviking_cli.session.user_id import UserIdentifier
+
+        entries = {
+            "viking://temp/import": [{"name": "bad root?@", "isDir": True}],
+            "viking://temp/import/bad root?@": [
+                {"name": "bad file?.md", "isDir": False},
+                {"name": "bad dir", "isDir": True},
+            ],
+            "viking://temp/import/bad root?@/bad dir": [
+                {"name": "nested@file?.md", "isDir": False},
+            ],
+        }
+        fs = self._make_fs(entries, set())
+        builder = TreeBuilder()
+        ctx = RequestContext(user=UserIdentifier.the_default_user(), role=Role.ROOT)
+
+        with patch("openviking.parse.tree_builder.get_viking_fs", return_value=fs):
+            tree = await builder.finalize_from_temp(
+                temp_dir_path="viking://temp/import",
+                ctx=ctx,
+                scope="resources",
+            )
+
+        assert tree.root.uri == "viking://resources/bad_root__"
+        assert tree.root.temp_uri == "viking://temp/import/bad_root__"
+        assert ("viking://temp/import/bad root?@", "viking://temp/import/bad_root__") in fs._moved
+        assert (
+            "viking://temp/import/bad_root__/bad file?.md",
+            "viking://temp/import/bad_root__/bad_file_.md",
+        ) in fs._moved
+        assert (
+            "viking://temp/import/bad_root__/bad dir",
+            "viking://temp/import/bad_root__/bad_dir",
+        ) in fs._moved
+
+    @pytest.mark.asyncio
+    async def test_finalize_from_temp_deduplicates_sanitized_sibling_names(self):
+        from openviking.parse.tree_builder import TreeBuilder
+        from openviking.server.identity import RequestContext, Role
+        from openviking_cli.session.user_id import UserIdentifier
+
+        entries = {
+            "viking://temp/import": [{"name": "root", "isDir": True}],
+            "viking://temp/import/root": [
+                {"name": "a?.md", "isDir": False},
+                {"name": "a_.md", "isDir": False},
+                {"name": "same dir?", "isDir": True},
+                {"name": "same_dir_", "isDir": True},
+            ],
+            "viking://temp/import/root/same dir?": [],
+            "viking://temp/import/root/same_dir_": [],
+        }
+        fs = self._make_fs(entries, set())
+        builder = TreeBuilder()
+        ctx = RequestContext(user=UserIdentifier.the_default_user(), role=Role.ROOT)
+
+        with patch("openviking.parse.tree_builder.get_viking_fs", return_value=fs):
+            tree = await builder.finalize_from_temp(
+                temp_dir_path="viking://temp/import",
+                ctx=ctx,
+                scope="resources",
+            )
+
+        assert tree.root.uri == "viking://resources/root"
+        assert ("viking://temp/import/root/a?.md", "viking://temp/import/root/a_.md") in fs._moved
+        assert ("viking://temp/import/root/a_.md", "viking://temp/import/root/a__1.md") in fs._moved
+        assert (
+            "viking://temp/import/root/same dir?",
+            "viking://temp/import/root/same_dir_",
+        ) in fs._moved
+        assert (
+            "viking://temp/import/root/same_dir_",
+            "viking://temp/import/root/same_dir__1",
+        ) in fs._moved

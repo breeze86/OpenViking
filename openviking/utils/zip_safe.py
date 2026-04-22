@@ -3,6 +3,7 @@
 """Safe ZIP extraction with Zip Slip protection."""
 
 import os
+import stat
 import zipfile
 from pathlib import Path
 
@@ -65,8 +66,14 @@ def safe_extract_zip(zipf: zipfile.ZipFile, dest_dir: Path) -> None:
     dest_dir = Path(dest_dir).resolve()
     normalize_zip_filenames(zipf)
     for member in zipf.infolist():
+        member.filename = member.filename.replace("\\", "/")
         member_path = (dest_dir / member.filename).resolve()
         # Ensure the resolved path is inside dest_dir
         if not str(member_path).startswith(str(dest_dir) + os.sep):
             raise ValueError(f"Zip Slip attempt detected: {member.filename}")
+
+        # Skip symlink entries; do not materialize links from archives.
+        mode = member.external_attr >> 16
+        if mode and stat.S_ISLNK(mode):
+            continue
         zipf.extract(member, dest_dir)
