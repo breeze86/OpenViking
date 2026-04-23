@@ -117,10 +117,11 @@ def run_ingest(client: ov.SyncHTTPClient, session_id_prefix: str):
         console.print(f"    共 {total} 条消息，提交...")
         commit_result = client.commit_session(session_id)
         trace_id = commit_result.get("trace_id", "N/A")
+        task_id = commit_result.get("task_id")
         trace_ids.append(trace_id)
-        console.print(f"    Commit: task_id={commit_result.get('task_id', 'N/A')}, trace_id={trace_id}")
+        console.print(f"    Commit: task_id={task_id or 'N/A'}, trace_id={trace_id}")
 
-    return session_id_prefix, trace_ids
+    return session_id_prefix, trace_ids, task_id
 
 
 # ── 验证数据隔离 ───────────────────────────────────────────────────────────
@@ -261,11 +262,24 @@ def run_test_for_account(account: str, url: str, root_key: str, wait: float) -> 
                     console.print(f"    - {user_id}: {e}")
 
         # 写入数据
-        session_id, trace_ids = run_ingest(client, f"test-{account}")
+        session_id, trace_ids, task_id = run_ingest(client, f"test-{account}")
 
-        # 等待处理
-        console.print(f"\n  [yellow]等待数据处理 ({wait:.0f}s)...[/yellow]")
-        time.sleep(wait)
+        # 轮询等待任务完成
+        if task_id:
+            console.print(f"\n  [yellow]等待记忆提取完成 (task_id={task_id})...[/yellow]")
+            start_time = time.time()
+            while True:
+                task = client.get_task(task_id)
+                if not task or task.get("status") in ("completed", "failed"):
+                    break
+                time.sleep(1)
+            elapsed = time.time() - start_time
+            status = task.get("status", "unknown") if task else "not found"
+            console.print(f"  [green]任务 {status}，耗时 {elapsed:.2f}s[/green]")
+
+        # 等待向量化完成
+        console.print(f"  [yellow]等待向量化完成...[/yellow]")
+        client.wait_processed()
 
         # 验证隔离
         verify_isolation(url, root_key, account)

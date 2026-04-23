@@ -350,46 +350,44 @@ class SessionCompressorV2:
         delete_by_uri = {dc.uri: dc for dc in operations.delete_file_contents}
 
         # Process written_uris - distinguish between add and update
+        # Use old_memory_file_content from the operation to determine if this is
+        # an update (old content existed) or a new add.
         for uri in result.written_uris:
-            # Check if file exists using a more explicit method
-            file_exists = False
-            old_content = None
-            try:
-                old_content = await viking_fs.read_file(uri=uri, ctx=ctx)
-                file_exists = True
-            except FileNotFoundError:
-                # File doesn't exist, this is a new add
-                file_exists = False
-            except Exception:
-                # Other errors - assume file doesn't exist to be safe
-                file_exists = False
+            op = upsert_by_uri.get(uri)
+            memory_type = op.memory_type if op else self._get_memory_type_from_uri(uri)
+            old_file = op.old_memory_file_content if op else None
 
-            if file_exists:
-                # File exists, this is an update (read-then-write)
+            if old_file:
+                # Old content existed, this is an update
+                raw_before = old_file.plain_content
+                parsed = parse_memory_file_with_fields(raw_before)
                 updates.append({
                     "uri": uri,
-                    "memory_type": self._get_memory_type_from_uri(uri),
-                    "before": old_content,
+                    "memory_type": memory_type,
+                    "before": parsed.get("content", raw_before),
                     "after": "",  # Will be filled after
                 })
             else:
-                # File doesn't exist, this is a new add
+                # No old content, this is a new add
                 adds.append({
                     "uri": uri,
-                    "memory_type": self._get_memory_type_from_uri(uri),
+                    "memory_type": memory_type,
                     "after": "",  # Will be filled after
                 })
 
         # Process edited_uris - these are updates
         for uri in result.edited_uris:
-            old_content = None
             op = upsert_by_uri.get(uri)
+            memory_type = op.memory_type if op else self._get_memory_type_from_uri(uri)
+            old_content = None
             if op and op.old_memory_file_content:
                 old_content = op.old_memory_file_content.plain_content
+            raw_before = old_content or ""
+            parsed = parse_memory_file_with_fields(raw_before)
             updates.append({
                 "uri": uri,
-                "memory_type": self._get_memory_type_from_uri(uri),
-                "before": old_content or "",
+                "memory_type": memory_type,
+                "before": parsed.get("content", raw_before) if raw_before else "",
                 "after": "",  # Will be filled after
             })
 
@@ -397,11 +395,15 @@ class SessionCompressorV2:
         for uri in result.deleted_uris:
             deleted_content = None
             dc = delete_by_uri.get(uri)
+            memory_type = dc.memory_fields.get("memory_type", "unknown") if dc else "unknown"
             if dc:
                 deleted_content = dc.plain_content
+            raw_deleted = deleted_content or ""
+            parsed = parse_memory_file_with_fields(raw_deleted)
             deletes.append({
                 "uri": uri,
-                "deleted_content": deleted_content or "",
+                "memory_type": memory_type,
+                "deleted_content": parsed.get("content", raw_deleted),
             })
 
         # Read new content for adds and updates

@@ -231,16 +231,18 @@ The final output of the model must strictly follow the JSON Schema format shown 
             logger.warning(
                 f"LLM returned neither tool calls nor operations (iteration {iteration}/{max_iterations})"
             )
-            # If it's the last iteration, use empty operations
-            if is_last_iteration:
-                final_operations = ResolvedOperations()
-                break
             # Add format error message if parse failed (max 1 retry)
             if self._format_retry_count == 0:
                 self._format_retry_count += 1
                 max_iterations += 1
                 tracer.info(f"Extended max_iterations to {max_iterations} for format retry")
                 self._add_format_error_message(messages)
+
+            # If it's the last iteration, use empty operations
+            if iteration >= max_iterations:
+                final_operations = ResolvedOperations()
+                break
+
             self._disable_tools_for_iteration = True
             continue
 
