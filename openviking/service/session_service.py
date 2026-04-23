@@ -271,12 +271,15 @@ class SessionService:
             raise NotInitializedError("SessionCompressor")
 
         session = await self.get(session_id, ctx)
+        session_uri = canonical_session_uri(session_id)
+        archive_uri = f"{session_uri}/manual_extract"
 
         memories = await self._session_compressor.extract_long_term_memories(
             messages=session.messages,
             user=ctx.user,
             session_id=session_id,
             ctx=ctx,
+            archive_uri=archive_uri,
         )
         try:
             from openviking.metrics.datasources.session import SessionLifecycleDataSource

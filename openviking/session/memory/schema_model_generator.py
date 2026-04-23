@@ -66,19 +66,17 @@ class SchemaModelGenerator:
         Returns:
             Dynamically created flat Pydantic model class
         """
-        # Use cache only when role_scope is not provided or has single user
-        cache_key = memory_type.memory_type
-        use_cache = role_scope is None or len(role_scope.user_ids) <= 1
-
-        if use_cache and cache_key in self._flat_data_models:
-            return self._flat_data_models[cache_key]
-
-        # Generate unique cache key when multiple users (to avoid cache conflicts)
+        # Determine cache key based on role_scope
         if role_scope and len(role_scope.user_ids) > 1:
             cache_key = f"{memory_type.memory_type}_multi_user"
             model_name = f"{to_pascal_case(memory_type.memory_type)}DataMultiUser"
         else:
+            cache_key = memory_type.memory_type
             model_name = f"{to_pascal_case(memory_type.memory_type)}Data"
+
+        # Check cache for both single and multi-user cases
+        if cache_key in self._flat_data_models:
+            return self._flat_data_models[cache_key]
 
         # Build field definitions - no memory_type field needed
         field_definitions: Dict[str, Tuple[Type[Any], Any]] = {}
@@ -121,9 +119,8 @@ class SchemaModelGenerator:
             **field_definitions,
         )
 
-        # Store in cache only for single-user case
-        if use_cache:
-            self._flat_data_models[cache_key] = model
+        # Store in cache with appropriate key
+        self._flat_data_models[cache_key] = model
         return model
 
     def generate_all_models(self, include_disabled: bool = True) -> Dict[str, Type[BaseModel]]:
@@ -221,22 +218,13 @@ class SchemaModelGenerator:
 
         for mt in enabled_memory_types:
             flat_model = self.create_flat_data_model(mt, role_scope)
-            is_single = not mt.filename_has_variables()
-
-            if is_single:
-                # Single value: Optional[FlatModel] = None
-                field_definitions[mt.memory_type] = (
-                    Optional[flat_model],  # type: ignore
-                    Field(None, description=f"{mt.memory_type} memory (add or edit)"),
-                )
-            else:
-                # List: List[FlatModel] = []
-                field_definitions[mt.memory_type] = (
-                    List[flat_model],  # type: ignore
-                    Field(
-                        default_factory=list, description=f"{mt.memory_type} memories (add or edit)"
-                    ),
-                )
+            # Always use List to support multiple users' memories (e.g., identity for different user_id/agent_id)
+            field_definitions[mt.memory_type] = (
+                List[flat_model],  # type: ignore
+                Field(
+                    default_factory=list, description=f"{mt.memory_type} memories (add or edit)"
+                ),
+            )
 
         field_definitions["delete_uris"] = (
             List[str],

@@ -65,7 +65,9 @@ class MemoryTypeRegistry:
                 )
 
     def register(self, memory_type: MemoryTypeSchema) -> None:
-        """Register a memory type."""
+        """Register a memory type. Raises error if already exists."""
+        if memory_type.memory_type in self._types:
+            raise ValueError(f"Duplicate memory type '{memory_type.memory_type}'")
         self._types[memory_type.memory_type] = memory_type
         logger.debug(f"Registered memory type: {memory_type.memory_type}")
 
